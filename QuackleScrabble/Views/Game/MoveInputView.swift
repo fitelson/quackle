@@ -35,8 +35,14 @@ struct MoveInputView: View {
                 .buttonStyle(.bordered)
             }
 
-            // Row 2: Exchange, Pass
+            // Row 2: Shuffle, Exchange, Pass
             HStack(spacing: 10) {
+                Button("Shuffle") {
+                    engine.shuffleRack()
+                }
+                .font(.system(size: 15))
+                .buttonStyle(.bordered)
+
                 Button("Exchange") {
                     engine.enterExchangeMode()
                 }

@@ -242,7 +242,7 @@ struct HistoryView: View {
                                     .frame(width: 25, alignment: .leading)
                                 Text(entry.playerName)
                                     .frame(width: 65, alignment: .leading)
-                                    .foregroundColor(entry.playerName == "BEF" ? .blue : .primary)
+                                    .foregroundColor(entry.playerName == "You" ? .blue : .primary)
                                 Text(entry.moveDescription)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                 Text("+\(entry.score)")

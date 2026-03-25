@@ -6,6 +6,14 @@ struct BoardView: View {
     private let spacing: CGFloat = 0.5
     private let labelWidth: CGFloat = 16
 
+    @State private var zoomScale: CGFloat = 1.0
+    @State private var zoomAnchor: UnitPoint = .center
+    @State private var dragOffset: CGSize = .zero
+    @State private var lastDragOffset: CGSize = .zero
+
+    private var isZoomed: Bool { zoomScale > 1.0 }
+    private let zoomedScale: CGFloat = 2.5
+
     var body: some View {
         let board = engine.board
         if board.isEmpty {
@@ -13,10 +21,6 @@ struct BoardView: View {
         } else {
             let cols = CGFloat(board[0].count)
             let rows = CGFloat(board.count)
-            // Width = labelWidth + cols * squareSize + (cols-1) * spacing
-            // Height = 0.5 * squareSize + rows * squareSize = (rows + 0.5) * squareSize
-            // squareSize = (width - labelWidth - (cols-1)*spacing) / cols
-            // So: height/width ≈ (rows + 0.5) / cols (approximately, ignoring label/spacing)
             let ratio = cols / (rows + 0.5)
 
             GeometryReader { geo in
@@ -59,8 +63,53 @@ struct BoardView: View {
                         }
                     }
                 }
+                .scaleEffect(zoomScale, anchor: zoomAnchor)
+                .offset(x: dragOffset.width, y: dragOffset.height)
+                .gesture(
+                    DragGesture()
+                        .onChanged { value in
+                            if isZoomed {
+                                dragOffset = CGSize(
+                                    width: lastDragOffset.width + value.translation.width,
+                                    height: lastDragOffset.height + value.translation.height
+                                )
+                            }
+                        }
+                        .onEnded { value in
+                            if isZoomed {
+                                lastDragOffset = dragOffset
+                                // Clamp so board doesn't fly off screen
+                                let maxX = geo.size.width * (zoomScale - 1) / 2
+                                let maxY = geo.size.height * (zoomScale - 1) / 2
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    dragOffset.width = min(max(dragOffset.width, -maxX), maxX)
+                                    dragOffset.height = min(max(dragOffset.height, -maxY), maxY)
+                                }
+                                lastDragOffset = dragOffset
+                            }
+                        }
+                )
+                .onTapGesture(count: 2) { location in
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        if isZoomed {
+                            zoomScale = 1.0
+                            dragOffset = .zero
+                            lastDragOffset = .zero
+                        } else {
+                            // Zoom into the tapped point
+                            zoomAnchor = UnitPoint(
+                                x: location.x / geo.size.width,
+                                y: location.y / geo.size.height
+                            )
+                            zoomScale = zoomedScale
+                            dragOffset = .zero
+                            lastDragOffset = .zero
+                        }
+                    }
+                }
             }
             .aspectRatio(ratio, contentMode: .fit)
+            .clipped()
         }
     }
 }

@@ -131,7 +131,7 @@ static std::string nsToStd(NSString *s) {
     players.push_back(human);
 
     // AI player using NormalPlayer
-    Player computer(MARK_UV("Quackle"), Player::ComputerPlayerType, 1);
+    Player computer(MARK_UV("AI"), Player::ComputerPlayerType, 1);
     NormalPlayer *ai = new NormalPlayer(meanLoss, stdDev, MARK_UV("Intermediate"));
     computer.setComputerPlayer(ai);
     players.push_back(computer);
@@ -140,7 +140,7 @@ static std::string nsToStd(NSString *s) {
     _game->associateKnownComputerPlayers();
     _game->addPosition();
 
-    NSLog(@"QuackleBridge: New game started - %@ vs Quackle (NormalPlayer delta=%.1f sigma=%.1f)",
+    NSLog(@"QuackleBridge: New game started - %@ vs AI (NormalPlayer delta=%.1f sigma=%.1f)",
           name, meanLoss, stdDev);
 }
 

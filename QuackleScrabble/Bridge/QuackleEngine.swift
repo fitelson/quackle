@@ -122,7 +122,7 @@ class QuackleEngine {
     }
 
     func startNewGame() {
-        bridge.startNewGame(withHumanName: "BEF", aiMeanLoss: skillMeanLoss, aiStdDev: skillStdDev)
+        bridge.startNewGame(withHumanName: "You", aiMeanLoss: skillMeanLoss, aiStdDev: skillStdDev)
         tentativePlacements = []
         errorMessage = nil
         lastMoveDescription = ""
@@ -387,6 +387,13 @@ class QuackleEngine {
     func generateTopMoves() {
         topMoves = kibitz(count: 50)
         showMoves = true
+    }
+
+    // MARK: - Shuffle
+
+    func shuffleRack() {
+        rack.shuffle()
+        updateAvailableRack()
     }
 
     // MARK: - Exchange
