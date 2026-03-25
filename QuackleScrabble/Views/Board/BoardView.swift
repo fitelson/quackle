@@ -79,6 +79,7 @@ struct BoardView: View {
                 }
                 .task(id: geo.size.width) {
                     let frame = geo.frame(in: .named("game"))
+                    engine.boardGeoFrame = frame
                     engine.boardGridOrigin = CGPoint(
                         x: frame.minX + labelWidth,
                         y: frame.minY + headerHeight
@@ -87,6 +88,9 @@ struct BoardView: View {
                 }
                 .scaleEffect(zoomScale, anchor: zoomAnchor)
                 .offset(x: dragOffset.width, y: dragOffset.height)
+                .onChange(of: zoomScale) { _, val in engine.boardZoomScale = val }
+                .onChange(of: zoomAnchor) { _, val in engine.boardZoomAnchor = val }
+                .onChange(of: dragOffset) { _, val in engine.boardPanOffset = val }
                 .gesture(
                     DragGesture()
                         .onChanged { value in

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 enum BonusType {
     case none, doubleLetter, tripleLetter, doubleWord, tripleWord
@@ -80,6 +81,10 @@ class QuackleEngine {
     var activeDragLocation: CGPoint = .zero
     var boardGridOrigin: CGPoint = .zero
     var boardSquareSizeForDrag: CGFloat = 0
+    var boardGeoFrame: CGRect = .zero
+    var boardZoomScale: CGFloat = 1.0
+    var boardZoomAnchor: UnitPoint = .center
+    var boardPanOffset: CGSize = .zero
     var isExchangeMode: Bool = false  // exchange tile selection mode
     var exchangeSelectedIds: Set<UUID> = []  // rack tiles selected for exchange
     var showSkillSlider: Bool = false
@@ -181,9 +186,20 @@ class QuackleEngine {
         guard let source = activeDragSource else { return }
         defer { activeDragSource = nil }
 
+        // Transform drag location from visual space back to unzoomed board space
+        var point = activeDragLocation
+        point.x -= boardPanOffset.width
+        point.y -= boardPanOffset.height
+        if boardZoomScale != 1.0 {
+            let anchorX = boardGeoFrame.minX + boardZoomAnchor.x * boardGeoFrame.width
+            let anchorY = boardGeoFrame.minY + boardZoomAnchor.y * boardGeoFrame.height
+            point.x = (point.x - anchorX) / boardZoomScale + anchorX
+            point.y = (point.y - anchorY) / boardZoomScale + anchorY
+        }
+
         let step = boardSquareSizeForDrag + 0.5
-        let relX = activeDragLocation.x - boardGridOrigin.x
-        let relY = activeDragLocation.y - boardGridOrigin.y
+        let relX = point.x - boardGridOrigin.x
+        let relY = point.y - boardGridOrigin.y
         let col = Int(relX / step)
         let row = Int(relY / step)
 

@@ -24,6 +24,7 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 
 - Tile placement uses immediate DragGesture (not tap-to-place or system onDrag/onDrop)
 - The "game" named coordinate space is defined on GameView's VStack and used by all drag gestures
-- Board geometry (grid origin, square size) is reported to the engine for drop-target calculation
+- Board geometry (grid origin, square size, zoom state) is reported to the engine for drop-target calculation
+- Drag-and-drop is zoom-aware: endDrag() inverse-transforms coordinates through scaleEffect + offset
 - Bundle ID: `com.bef.quacklescrabble`
 - Lexicon: TWL06
