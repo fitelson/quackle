@@ -12,5 +12,9 @@ struct QuackleScrabbleApp: App {
                     engine.initialize()
                 }
         }
+        #if os(macOS)
+        .defaultSize(width: 500, height: 860)
+        .windowResizability(.contentSize)
+        #endif
     }
 }

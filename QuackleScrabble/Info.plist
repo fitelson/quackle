@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleName</key>
-    <string>Quackle Scrabble</string>
+    <string>Scrabble</string>
     <key>CFBundleDisplayName</key>
     <string>Scrabble</string>
     <key>CFBundleIdentifier</key>

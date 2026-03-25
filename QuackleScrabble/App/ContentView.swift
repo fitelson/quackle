@@ -24,6 +24,9 @@ struct ContentView: View {
                 }
             }
             .padding()
+            #if os(macOS)
+            .frame(width: 500, height: 860)
+            #endif
         } else {
             GameView()
         }
@@ -98,26 +101,37 @@ struct GameView: View {
         }
         .padding(.horizontal, 4)
         .padding(.bottom, 16)
+        #if os(macOS)
+        .frame(width: 500, height: 860)
+        #endif
         .sheet(isPresented: $engine.showBlankPicker) {
             BlankPickerView()
                 .environment(engine)
+                #if os(iOS)
                 .presentationDetents([.medium])
+                #endif
         }
         .sheet(isPresented: $engine.showMoves) {
             TopMovesView()
                 .environment(engine)
+                #if os(iOS)
                 .presentationDetents([.large])
                 .interactiveDismissDisabled()
+                #endif
         }
         .sheet(isPresented: $engine.showHistory) {
             HistoryView()
                 .environment(engine)
+                #if os(iOS)
                 .presentationDetents([.large])
+                #endif
         }
         .sheet(isPresented: $engine.showSkillSlider) {
             SkillSliderView()
                 .environment(engine)
+                #if os(iOS)
                 .presentationDetents([.height(200)])
+                #endif
         }
     }
 }
@@ -164,6 +178,9 @@ struct BlankPickerView: View {
             }
             .padding(.bottom)
         }
+        #if os(macOS)
+        .frame(width: 350, height: 280)
+        #endif
     }
 }
 
@@ -172,6 +189,7 @@ struct TopMovesView: View {
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
+        #if os(iOS)
         NavigationStack {
             List(Array(engine.topMoves.enumerated()), id: \.element.id) { index, move in
                 HStack {
@@ -193,6 +211,45 @@ struct TopMovesView: View {
                 }
             }
         }
+        #else
+        VStack(spacing: 0) {
+            HStack {
+                Text("Top Moves")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            .padding()
+
+            // Header
+            HStack {
+                Text("Move")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Score")
+                    .frame(width: 50, alignment: .trailing)
+                Text("Equity")
+                    .frame(width: 60, alignment: .trailing)
+            }
+            .font(.system(size: 12, weight: .bold))
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+            .background(Color.gray.opacity(0.2))
+
+            List(Array(engine.topMoves.enumerated()), id: \.element.id) { index, move in
+                HStack {
+                    Text(move.description)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("\(move.score)")
+                        .frame(width: 50, alignment: .trailing)
+                    Text(String(format: "%.1f", move.equity))
+                        .frame(width: 60, alignment: .trailing)
+                }
+                .font(.system(size: 14))
+            }
+            .listStyle(.plain)
+        }
+        .frame(width: 450, height: 500)
+        #endif
     }
 }
 
@@ -260,6 +317,9 @@ struct HistoryView: View {
                 }
             }
         }
+        #if os(macOS)
+        .frame(width: 450, height: 500)
+        #endif
     }
 }
 
@@ -293,5 +353,8 @@ struct SkillSliderView: View {
             Button("Done") { dismiss() }
                 .padding(.bottom)
         }
+        #if os(macOS)
+        .frame(width: 350, height: 180)
+        #endif
     }
 }
