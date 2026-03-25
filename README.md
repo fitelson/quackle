@@ -50,7 +50,7 @@ project.yml       — XcodeGen project spec
 
 ## Acknowledgments
 
-This app uses the [Quackle](https://github.com/quackle/quackle) crossword game AI engine, created by **Jason Katz-Brown**, **John O'Laughlin**, and **John Fultz**. Quackle is released under the [GPL v2+](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+This app uses the [Quackle](https://github.com/quackle/quackle) crossword game AI engine, created by **Jason Katz-Brown**, **John O'Laughlin**, and **John Fultz**. Quackle is released under the [GPL v3+](https://www.gnu.org/licenses/gpl-3.0.html).
 
 ## Related
 
