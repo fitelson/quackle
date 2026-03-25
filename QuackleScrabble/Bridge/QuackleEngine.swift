@@ -14,6 +14,13 @@ struct TileModel: Identifiable, Equatable {
     static func == (lhs: TileModel, rhs: TileModel) -> Bool {
         lhs.id == rhs.id
     }
+
+    static let tilePoints: [String: Int] = [
+        "A": 1, "B": 3, "C": 3, "D": 2, "E": 1, "F": 4, "G": 2, "H": 4,
+        "I": 1, "J": 8, "K": 5, "L": 1, "M": 3, "N": 1, "O": 1, "P": 3,
+        "Q": 10, "R": 1, "S": 1, "T": 1, "U": 1, "V": 4, "W": 4, "X": 8,
+        "Y": 4, "Z": 10, "?": 0
+    ]
 }
 
 struct SquareModel {
@@ -34,6 +41,11 @@ struct PlayerModel {
     let score: Int
 }
 
+enum DragSource: Equatable {
+    case rack(tileId: UUID)
+    case board(row: Int, col: Int)
+}
+
 @MainActor
 @Observable
 class QuackleEngine {
@@ -51,15 +63,23 @@ class QuackleEngine {
     var loadingProgress: Double = 0.0
     var loadingStatus: String = ""
 
-    // Tap-to-place state
+    // Tile placement state
     var tentativePlacements: [TilePlacement] = []
     var availableRack: [TileModel] = []  // rack minus placed tiles
-    var selectedRackTileId: UUID? = nil  // currently selected rack tile
     var isTentativeMoveValid: Bool = false  // real-time validation
     var tentativeMoveString: String? = nil  // the built move string
     var showBlankPicker: Bool = false  // show letter picker for blank tile
     var pendingBlankRow: Int = -1
     var pendingBlankCol: Int = -1
+
+    // Drag and drop state
+    var activeDragSource: DragSource? = nil
+    var activeDragLetter: String = ""
+    var activeDragIsBlank: Bool = false
+    var activeDragPoints: Int = 0
+    var activeDragLocation: CGPoint = .zero
+    var boardGridOrigin: CGPoint = .zero
+    var boardSquareSizeForDrag: CGFloat = 0
     var isExchangeMode: Bool = false  // exchange tile selection mode
     var exchangeSelectedIds: Set<UUID> = []  // rack tiles selected for exchange
     var showSkillSlider: Bool = false
@@ -136,47 +156,67 @@ class QuackleEngine {
         }
     }
 
-    // MARK: - Tap to Place
+    // MARK: - Drag and Drop
 
-    func selectRackTile(_ tile: TileModel) {
-        if selectedRackTileId == tile.id {
-            selectedRackTileId = nil  // deselect
-        } else {
-            selectedRackTileId = tile.id
-        }
+    func startDragFromRack(tile: TileModel) {
+        activeDragSource = .rack(tileId: tile.id)
+        activeDragLetter = tile.isBlank ? "?" : tile.letter
+        activeDragIsBlank = tile.isBlank
+        activeDragPoints = tile.points
     }
 
-    func handleBoardTap(row: Int, col: Int) {
-        // If tapping a tentative tile, remove it
-        if tentativeLetterAt(row: row, col: col) != nil {
-            removeTentativeTile(atRow: row, col: col)
-            return
-        }
+    func startDragFromBoard(row: Int, col: Int) {
+        guard let placement = tentativeLetterAt(row: row, col: col) else { return }
+        activeDragSource = .board(row: row, col: col)
+        activeDragLetter = placement.isBlank ? placement.letter.lowercased() : placement.letter
+        activeDragIsBlank = placement.isBlank
+        activeDragPoints = placement.isBlank ? 0 : (TileModel.tilePoints[placement.letter.uppercased()] ?? 0)
+    }
 
-        // If a rack tile is selected, place it
-        guard let selectedId = selectedRackTileId,
-              let tile = availableRack.first(where: { $0.id == selectedId }) else {
-            return
-        }
+    func updateDragLocation(_ location: CGPoint) {
+        activeDragLocation = location
+    }
 
-        // Don't place on occupied squares
-        if board[row][col].letter != nil { return }
-        if tentativePlacements.contains(where: { $0.row == row && $0.col == col }) { return }
+    func endDrag() {
+        guard let source = activeDragSource else { return }
+        defer { activeDragSource = nil }
 
-        if tile.isBlank {
-            // Show letter picker for blank tile
-            pendingBlankRow = row
-            pendingBlankCol = col
-            showBlankPicker = true
-        } else {
-            placeTile(letter: tile.letter, isBlank: false, atRow: row, col: col)
-            selectedRackTileId = nil
+        let step = boardSquareSizeForDrag + 0.5
+        let relX = activeDragLocation.x - boardGridOrigin.x
+        let relY = activeDragLocation.y - boardGridOrigin.y
+        let col = Int(relX / step)
+        let row = Int(relY / step)
+
+        let onBoard = row >= 0 && row < board.count &&
+                      col >= 0 && col < (board.first?.count ?? 0)
+        let validTarget = onBoard &&
+                          board[row][col].letter == nil &&
+                          tentativeLetterAt(row: row, col: col) == nil
+
+        switch source {
+        case .rack(let tileId):
+            guard validTarget else { return }
+            guard let tile = availableRack.first(where: { $0.id == tileId }) else { return }
+            if tile.isBlank {
+                pendingBlankRow = row
+                pendingBlankCol = col
+                showBlankPicker = true
+            } else {
+                placeTile(letter: tile.letter, isBlank: false, atRow: row, col: col)
+            }
+
+        case .board(let fromRow, let fromCol):
+            if validTarget {
+                moveTentativeTile(fromRow: fromRow, fromCol: fromCol, toRow: row, toCol: col)
+            } else if !onBoard {
+                // Dropped outside board — return tile to rack
+                removeTentativeTile(atRow: fromRow, col: fromCol)
+            }
         }
     }
 
     func placeBlankAs(letter: String) {
         placeTile(letter: letter, isBlank: true, atRow: pendingBlankRow, col: pendingBlankCol)
-        selectedRackTileId = nil
         showBlankPicker = false
     }
 
@@ -202,6 +242,16 @@ class QuackleEngine {
         updateAvailableRack()
         isTentativeMoveValid = false
         tentativeMoveString = nil
+    }
+
+    private func moveTentativeTile(fromRow: Int, fromCol: Int, toRow: Int, toCol: Int) {
+        guard let idx = tentativePlacements.firstIndex(where: { $0.row == fromRow && $0.col == fromCol }) else { return }
+        if board[toRow][toCol].letter != nil { return }
+        if tentativePlacements.contains(where: { $0.row == toRow && $0.col == toCol }) { return }
+
+        let old = tentativePlacements[idx]
+        tentativePlacements[idx] = TilePlacement(row: toRow, col: toCol, letter: old.letter, isBlank: old.isBlank)
+        validateTentativeMove()
     }
 
     private func validateTentativeMove() {
@@ -245,7 +295,6 @@ class QuackleEngine {
             let committed = self.bridge.commitMove(moveString)
             if committed {
                 self.tentativePlacements = []
-                self.selectedRackTileId = nil
                 self.refreshState()
                 self.triggerAIIfNeeded()
             } else {
@@ -407,7 +456,6 @@ class QuackleEngine {
 
     func enterExchangeMode() {
         clearTentativePlacements()
-        selectedRackTileId = nil
         isExchangeMode = true
         exchangeSelectedIds = []
     }
@@ -524,7 +572,7 @@ class QuackleEngine {
 
         let rackLetters = bridge.currentPlayerRack()
         rack = rackLetters.map { letter in
-            TileModel(letter: letter, points: 0, isBlank: letter == "?")
+            TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
         }
         updateAvailableRack()
 

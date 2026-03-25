@@ -101,6 +101,31 @@ struct GameView: View {
         }
         .padding(.horizontal, 4)
         .padding(.bottom, 16)
+        .coordinateSpace(name: "game")
+        .overlay {
+            if engine.activeDragSource != nil {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color(red: 1.0, green: 0.92, blue: 0.80))
+                        .frame(width: 44, height: 44)
+                        .shadow(radius: 3)
+
+                    Text(engine.activeDragIsBlank ? "?" : engine.activeDragLetter)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundColor(.black)
+
+                    if !engine.activeDragIsBlank {
+                        Text("\(engine.activeDragPoints)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.black.opacity(0.6))
+                            .padding(3)
+                            .frame(width: 44, height: 44, alignment: .bottomTrailing)
+                    }
+                }
+                .position(engine.activeDragLocation)
+                .allowsHitTesting(false)
+            }
+        }
         #if os(macOS)
         .frame(width: 500, height: 860)
         #endif

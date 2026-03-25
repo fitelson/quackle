@@ -47,21 +47,43 @@ struct BoardView: View {
                                 .frame(width: labelWidth, height: squareSize)
 
                             ForEach(0..<board[row].count, id: \.self) { col in
-                                SquareView(
+                                let tentative = engine.tentativeLetterAt(row: row, col: col)
+                                let square = SquareView(
                                     square: board[row][col],
-                                    tentative: engine.tentativeLetterAt(row: row, col: col),
+                                    tentative: tentative,
                                     isValid: engine.isTentativeMoveValid,
                                     hasTentativeTiles: !engine.tentativePlacements.isEmpty,
                                     row: row,
                                     col: col,
                                     size: squareSize
                                 )
-                                .onTapGesture {
-                                    engine.handleBoardTap(row: row, col: col)
+                                if tentative != nil {
+                                    square.gesture(
+                                        DragGesture(minimumDistance: 5, coordinateSpace: .named("game"))
+                                            .onChanged { value in
+                                                if engine.activeDragSource == nil {
+                                                    engine.startDragFromBoard(row: row, col: col)
+                                                }
+                                                engine.updateDragLocation(value.location)
+                                            }
+                                            .onEnded { _ in
+                                                engine.endDrag()
+                                            }
+                                    )
+                                } else {
+                                    square
                                 }
                             }
                         }
                     }
+                }
+                .task(id: geo.size.width) {
+                    let frame = geo.frame(in: .named("game"))
+                    engine.boardGridOrigin = CGPoint(
+                        x: frame.minX + labelWidth,
+                        y: frame.minY + headerHeight
+                    )
+                    engine.boardSquareSizeForDrag = squareSize
                 }
                 .scaleEffect(zoomScale, anchor: zoomAnchor)
                 .offset(x: dragOffset.width, y: dragOffset.height)
@@ -131,12 +153,26 @@ struct SquareView: View {
 
             if let t = tentative {
                 Text(t.isBlank ? t.letter.lowercased() : t.letter)
-                    .font(.system(size: size * 0.55, weight: .bold))
+                    .font(.system(size: size * 0.5, weight: .bold))
                     .foregroundColor(.white)
+                if !t.isBlank {
+                    Text("\(TileModel.tilePoints[t.letter.uppercased()] ?? 0)")
+                        .font(.system(size: size * 0.2, weight: .bold))
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(size * 0.04)
+                        .frame(width: size, height: size, alignment: .bottomTrailing)
+                }
             } else if let letter = square.letter {
                 Text(square.isBlank ? letter.lowercased() : letter)
-                    .font(.system(size: size * 0.55, weight: .bold))
+                    .font(.system(size: size * 0.5, weight: .bold))
                     .foregroundColor(square.isBlank ? .red : .black)
+                if !square.isBlank {
+                    Text("\(TileModel.tilePoints[letter.uppercased()] ?? 0)")
+                        .font(.system(size: size * 0.2, weight: .bold))
+                        .foregroundColor(.black.opacity(0.5))
+                        .padding(size * 0.04)
+                        .frame(width: size, height: size, alignment: .bottomTrailing)
+                }
             } else {
                 Text(bonusText)
                     .font(.system(size: size * 0.22, weight: .bold))

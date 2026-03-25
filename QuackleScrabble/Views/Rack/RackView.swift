@@ -22,35 +22,55 @@ struct RackView: View {
                             )
 
                         Text(tile.isBlank ? "?" : tile.letter)
-                            .font(.system(size: 24, weight: .bold))
+                            .font(.system(size: 22, weight: .bold))
                             .foregroundColor(.black)
+
+                        if !tile.isBlank {
+                            Text("\(tile.points)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.black.opacity(0.6))
+                                .padding(3)
+                                .frame(width: 44, height: 44, alignment: .bottomTrailing)
+                        }
                     }
                     .onTapGesture {
                         engine.toggleExchangeTile(tile)
                     }
                 }
             } else {
-                // Normal mode: show available rack tiles
+                // Normal mode: drag tiles to the board
                 ForEach(engine.availableRack) { tile in
                     ZStack {
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(tile.id == engine.selectedRackTileId
-                                  ? Color(red: 0.7, green: 0.9, blue: 0.7)
-                                  : Color(red: 1.0, green: 0.92, blue: 0.80))
+                            .fill(Color(red: 1.0, green: 0.92, blue: 0.80))
                             .frame(width: 44, height: 44)
                             .shadow(radius: 1)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(tile.id == engine.selectedRackTileId ? Color.green : Color.clear, lineWidth: 2)
-                            )
 
                         Text(tile.isBlank ? "?" : tile.letter)
-                            .font(.system(size: 24, weight: .bold))
+                            .font(.system(size: 22, weight: .bold))
                             .foregroundColor(.black)
+
+                        if !tile.isBlank {
+                            Text("\(tile.points)")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.black.opacity(0.6))
+                                .padding(3)
+                                .frame(width: 44, height: 44, alignment: .bottomTrailing)
+                        }
                     }
-                    .onTapGesture {
-                        engine.selectRackTile(tile)
-                    }
+                    .opacity(engine.activeDragSource == .rack(tileId: tile.id) ? 0.3 : 1.0)
+                    .gesture(
+                        DragGesture(minimumDistance: 5, coordinateSpace: .named("game"))
+                            .onChanged { value in
+                                if engine.activeDragSource == nil {
+                                    engine.startDragFromRack(tile: tile)
+                                }
+                                engine.updateDragLocation(value.location)
+                            }
+                            .onEnded { _ in
+                                engine.endDrag()
+                            }
+                    )
                 }
             }
         }
