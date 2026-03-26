@@ -85,6 +85,8 @@ class QuackleEngine {
     var boardZoomScale: CGFloat = 1.0
     var boardZoomAnchor: UnitPoint = .center
     var boardPanOffset: CGSize = .zero
+    var rackFrame: CGRect = .zero
+    var rackReorderIndex: Int? = nil  // live preview index during rack drag
     var isExchangeMode: Bool = false  // exchange tile selection mode
     var exchangeSelectedIds: Set<UUID> = []  // rack tiles selected for exchange
     var showSkillSlider: Bool = false
@@ -168,6 +170,9 @@ class QuackleEngine {
         activeDragLetter = tile.isBlank ? "?" : tile.letter
         activeDragIsBlank = tile.isBlank
         activeDragPoints = tile.points
+        if let idx = availableRack.firstIndex(where: { $0.id == tile.id }) {
+            rackReorderIndex = idx
+        }
     }
 
     func startDragFromBoard(row: Int, col: Int) {
@@ -178,12 +183,62 @@ class QuackleEngine {
         activeDragPoints = placement.isBlank ? 0 : (TileModel.tilePoints[placement.letter.uppercased()] ?? 0)
     }
 
+    func moveRackTile(tileId: UUID, toVisualIndex: Int) {
+        var visual = availableRack
+        guard let fromIdx = visual.firstIndex(where: { $0.id == tileId }) else { return }
+        let toIdx = max(0, min(toVisualIndex, visual.count - 1))
+        if fromIdx == toIdx { return }
+
+        let tile = visual.remove(at: fromIdx)
+        visual.insert(tile, at: toIdx)
+
+        // Rebuild rack: available tiles get new order, unavailable tiles keep position
+        let availableIds = Set(visual.map { $0.id })
+        var newRack: [TileModel] = []
+        var iter = visual.makeIterator()
+        for oldTile in rack {
+            if availableIds.contains(oldTile.id) {
+                if let next = iter.next() {
+                    newRack.append(next)
+                }
+            } else {
+                newRack.append(oldTile)
+            }
+        }
+
+        rack = newRack
+        updateAvailableRack()
+    }
+
     func updateDragLocation(_ location: CGPoint) {
         activeDragLocation = location
+        if case .rack = activeDragSource {
+            updateRackReorderIndex()
+        }
+    }
+
+    private func updateRackReorderIndex() {
+        let expandedFrame = rackFrame.insetBy(dx: -30, dy: -30)
+        if expandedFrame.contains(activeDragLocation) {
+            let tileSlot: CGFloat = 47
+            let relX = activeDragLocation.x - rackFrame.minX
+            let index = max(0, min(Int(relX / tileSlot), availableRack.count - 1))
+            if index != rackReorderIndex {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    rackReorderIndex = index
+                }
+            }
+        } else if rackReorderIndex != nil {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                rackReorderIndex = nil
+            }
+        }
     }
 
     func endDrag() {
         guard let source = activeDragSource else { return }
+        let finalReorderIndex = rackReorderIndex
+        rackReorderIndex = nil
         defer { activeDragSource = nil }
 
         // Transform drag location from visual space back to unzoomed board space
@@ -211,14 +266,17 @@ class QuackleEngine {
 
         switch source {
         case .rack(let tileId):
-            guard validTarget else { return }
-            guard let tile = availableRack.first(where: { $0.id == tileId }) else { return }
-            if tile.isBlank {
-                pendingBlankRow = row
-                pendingBlankCol = col
-                showBlankPicker = true
-            } else {
-                placeTile(letter: tile.letter, isBlank: false, atRow: row, col: col)
+            if validTarget {
+                guard let tile = availableRack.first(where: { $0.id == tileId }) else { return }
+                if tile.isBlank {
+                    pendingBlankRow = row
+                    pendingBlankCol = col
+                    showBlankPicker = true
+                } else {
+                    placeTile(letter: tile.letter, isBlank: false, atRow: row, col: col)
+                }
+            } else if let targetIndex = finalReorderIndex, availableRack.count > 1 {
+                moveRackTile(tileId: tileId, toVisualIndex: targetIndex)
             }
 
         case .board(let fromRow, let fromCol):

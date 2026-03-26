@@ -3,6 +3,21 @@ import SwiftUI
 struct RackView: View {
     @Environment(QuackleEngine.self) var engine
 
+    private var rackDisplayOrder: [TileModel] {
+        guard case .rack(let dragId) = engine.activeDragSource,
+              let targetIdx = engine.rackReorderIndex else {
+            return engine.availableRack
+        }
+        var tiles = engine.availableRack
+        guard let fromIdx = tiles.firstIndex(where: { $0.id == dragId }) else {
+            return engine.availableRack
+        }
+        if fromIdx == targetIdx { return tiles }
+        let tile = tiles.remove(at: fromIdx)
+        tiles.insert(tile, at: min(targetIdx, tiles.count))
+        return tiles
+    }
+
     var body: some View {
         HStack(spacing: 3) {
             if engine.isExchangeMode {
@@ -38,8 +53,8 @@ struct RackView: View {
                     }
                 }
             } else {
-                // Normal mode: drag tiles to the board
-                ForEach(engine.availableRack) { tile in
+                // Normal mode: drag tiles to the board (with live reorder preview)
+                ForEach(rackDisplayOrder) { tile in
                     ZStack {
                         RoundedRectangle(cornerRadius: 4)
                             .fill(Color(red: 1.0, green: 0.92, blue: 0.80))
@@ -74,6 +89,13 @@ struct RackView: View {
                 }
             }
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear.task(id: geo.size.width) {
+                    engine.rackFrame = geo.frame(in: .named("game"))
+                }
+            }
+        )
         .padding(.vertical, 8)
     }
 }
