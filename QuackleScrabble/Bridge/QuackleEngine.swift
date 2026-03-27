@@ -170,7 +170,6 @@ class QuackleEngine {
         aiAnimTiles = []
         aiAnimPhase = 0
         refreshState()
-        humanFirst = (players.first?.name == "You")
         if !isHumanTurn {
             // Delay AI's first move so the view renders before the board updates
             Task {
@@ -183,6 +182,7 @@ class QuackleEngine {
     // MARK: - Drag and Drop
 
     func startDragFromRack(tile: TileModel) {
+        guard !isAnimatingAIMove else { return }
         activeDragSource = .rack(tileId: tile.id)
         activeDragLetter = tile.isBlank ? "?" : tile.letter
         activeDragIsBlank = tile.isBlank
@@ -193,6 +193,7 @@ class QuackleEngine {
     }
 
     func startDragFromBoard(row: Int, col: Int) {
+        guard !isAnimatingAIMove else { return }
         guard let placement = tentativeLetterAt(row: row, col: col) else { return }
         activeDragSource = .board(row: row, col: col)
         activeDragLetter = placement.isBlank ? placement.letter.lowercased() : placement.letter
@@ -716,7 +717,11 @@ class QuackleEngine {
         }
         board = newBoard
 
+        // Determine humanFirst from the bridge (player 0's name)
+        humanFirst = (bridge.name(forPlayerIndex: 0) == "You")
         let humanIndex: Int32 = humanFirst ? 0 : 1
+        let aiIndex: Int32 = humanFirst ? 1 : 0
+
         let rackLetters = bridge.rack(forPlayerIndex: humanIndex) as [String]
         rack = rackLetters.map { letter in
             TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
@@ -737,7 +742,6 @@ class QuackleEngine {
         isHumanTurn = bridge.isCurrentPlayerHuman()
         isGameOver = bridge.isGameOver()
         tilesInBag = Int(bridge.tilesRemainingInBag())
-        let aiIndex: Int32 = humanFirst ? 1 : 0
         opponentTileCount = (bridge.rack(forPlayerIndex: aiIndex) as [String]).count
         turnNumber = Int(bridge.turnNumber())
 
