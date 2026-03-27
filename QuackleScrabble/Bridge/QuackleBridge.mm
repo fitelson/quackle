@@ -378,6 +378,29 @@ static std::string nsToStd(NSString *s) {
         }
     }
 
+    // Extract placed tile positions before committing
+    NSMutableArray<QBTileInfo *> *placedTiles = [NSMutableArray array];
+    if (chosenMove.action == Move::Place) {
+        const LetterString &tiles = chosenMove.tiles();
+        int row = chosenMove.startrow;
+        int col = chosenMove.startcol;
+        for (unsigned int i = 0; i < tiles.length(); ++i) {
+            Letter letter = tiles[i];
+            if (!Move::isAlreadyOnBoard(letter)) {
+                QBTileInfo *tile = [[QBTileInfo alloc] init];
+                tile.row = row;
+                tile.col = col;
+                tile.isBlank = QUACKLE_ALPHABET_PARAMETERS->isBlankLetter(letter);
+                Letter plain = QUACKLE_ALPHABET_PARAMETERS->clearBlankness(letter);
+                UVString vis = QUACKLE_ALPHABET_PARAMETERS->userVisible(plain);
+                tile.letter = uvToNS(vis);
+                tile.points = tile.isBlank ? 0 : QUACKLE_ALPHABET_PARAMETERS->letterParameter(plain).score();
+                [placedTiles addObject:tile];
+            }
+            if (chosenMove.horizontal) col++; else row++;
+        }
+    }
+
     _game->commitMove(chosenMove);
 
     QBMoveInfo *info = [[QBMoveInfo alloc] init];
@@ -385,6 +408,7 @@ static std::string nsToStd(NSString *s) {
     info.score = chosenMove.effectiveScore();
     info.equity = chosenMove.equity;
     info.moveType = (int)chosenMove.action;
+    info.placedTiles = placedTiles;
     return info;
 }
 

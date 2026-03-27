@@ -57,6 +57,7 @@ class QuackleEngine {
     var isHumanTurn: Bool = true
     var isGameOver: Bool = false
     var tilesInBag: Int = 100
+    var opponentTileCount: Int = 7
     var turnNumber: Int = 0
     var lastMoveDescription: String = ""
     var errorMessage: String? = nil
@@ -96,6 +97,13 @@ class QuackleEngine {
     var showMoves: Bool = false
     var topMoves: [MoveModel] = []
     var humanFirst: Bool = true
+
+    // AI move animation state
+    var isAnimatingAIMove: Bool = false
+    var aiAnimPhase: Int = 0  // 0=face-down at rack, 1=face-up at rack, 2=face-up flying to board
+    var aiAnimTiles: [AIAnimTile] = []
+    var opponentRackOrigin: CGPoint = .zero  // top-left of opponent rack in "game" space
+    var opponentTileSize: CGFloat = 24
 
     private let bridge = QuackleBridge.shared()
 
@@ -158,6 +166,9 @@ class QuackleEngine {
         moveHistory = []
         errorMessage = nil
         lastMoveDescription = ""
+        isAnimatingAIMove = false
+        aiAnimTiles = []
+        aiAnimPhase = 0
         refreshState()
         humanFirst = (players.first?.name == "You")
         if !isHumanTurn {
@@ -601,11 +612,66 @@ class QuackleEngine {
         if !isHumanTurn && !isGameOver {
             let bridge = self.bridge
             Task.detached {
-                _ = bridge.haveComputerPlay()
+                let result = bridge.haveComputerPlay()
                 await MainActor.run { [weak self] in
-                    self?.refreshState()
+                    guard let self else { return }
+                    if let result, result.moveType == 0,
+                       !result.placedTiles.isEmpty {
+                        self.animateAIMove(tiles: result.placedTiles)
+                    } else {
+                        self.refreshState()
+                    }
                 }
             }
+        }
+    }
+
+    func boardPositionForSquare(row: Int, col: Int) -> CGPoint {
+        let step = boardSquareSizeForDrag + 0.5
+        return CGPoint(
+            x: boardGridOrigin.x + CGFloat(col) * step + boardSquareSizeForDrag / 2,
+            y: boardGridOrigin.y + CGFloat(row) * step + boardSquareSizeForDrag / 2
+        )
+    }
+
+    func rackPositionForIndex(_ index: Int, tileWidth: CGFloat, spacing: CGFloat, totalCount: Int) -> CGPoint {
+        let totalWidth = CGFloat(totalCount) * tileWidth + CGFloat(totalCount - 1) * spacing
+        let startX = opponentRackOrigin.x - totalWidth / 2
+        return CGPoint(
+            x: startX + CGFloat(index) * (tileWidth + spacing) + tileWidth / 2,
+            y: opponentRackOrigin.y
+        )
+    }
+
+    private func animateAIMove(tiles: [QBTileInfo]) {
+        aiAnimTiles = tiles.enumerated().map { i, t in
+            AIAnimTile(
+                letter: t.letter,
+                isBlank: t.isBlank,
+                points: Int(t.points),
+                targetRow: Int(t.row),
+                targetCol: Int(t.col),
+                rackIndex: i
+            )
+        }
+        aiAnimPhase = 0
+        isAnimatingAIMove = true
+
+        // Phase 0: face-down at rack → Phase 1: flip face-up in rack → Phase 2: fly to board
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            withAnimation(.easeInOut(duration: 0.4)) {
+                self.aiAnimPhase = 1  // flip in place
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            withAnimation(.easeInOut(duration: 0.5)) {
+                self.aiAnimPhase = 2  // fly to board
+            }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            self.isAnimatingAIMove = false
+            self.aiAnimTiles = []
+            self.aiAnimPhase = 0
+            self.refreshState()
         }
     }
 
@@ -670,6 +736,8 @@ class QuackleEngine {
         isHumanTurn = bridge.isCurrentPlayerHuman()
         isGameOver = bridge.isGameOver()
         tilesInBag = Int(bridge.tilesRemainingInBag())
+        let aiIndex: Int32 = humanFirst ? 1 : 0
+        opponentTileCount = (bridge.rack(forPlayerIndex: aiIndex) as [String]).count
         turnNumber = Int(bridge.turnNumber())
 
         // Auto-save after each state change

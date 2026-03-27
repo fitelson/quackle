@@ -18,7 +18,8 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - `QuackleScrabble/Bridge/` — QuackleEngine.swift (main Observable engine), QuackleBridge (Obj-C++ bridge to C++ Quackle)
 - `QuackleScrabble/Views/Board/` — BoardView, SquareView
 - `QuackleScrabble/Views/Rack/` — RackView
-- `QuackleScrabble/Model/` — GameState (TilePlacement, MoveHistoryEntry, SavedGameState)
+- `QuackleScrabble/Model/` — GameState (TilePlacement, MoveHistoryEntry, AIAnimTile, SavedGameState)
+- `QuackleScrabble/Views/Game/` — OpponentRackView, AIAnimationOverlay, ScoreboardView, MoveInputView
 
 ## Key conventions
 

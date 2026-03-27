@@ -46,6 +46,8 @@ struct GameView: View {
             BoardView()
                 .padding(.horizontal, 2)
 
+            OpponentRackView()
+
             Spacer(minLength: 0)
 
             // Submit/Clear row between board and rack
@@ -68,7 +70,7 @@ struct GameView: View {
                     .controlSize(.large)
                 }
             } else if !engine.tentativePlacements.isEmpty {
-                VStack(spacing: 6) {
+                HStack(spacing: 12) {
                     if engine.isTentativeMoveValid {
                         Button("Submit") {
                             engine.commitTentativeMove()
@@ -124,6 +126,13 @@ struct GameView: View {
                 }
                 .position(engine.activeDragLocation)
                 .allowsHitTesting(false)
+            }
+        }
+        .overlay {
+            if engine.isAnimatingAIMove {
+                AIAnimationOverlay()
+                    .environment(engine)
+                    .allowsHitTesting(false)
             }
         }
         #if os(macOS)

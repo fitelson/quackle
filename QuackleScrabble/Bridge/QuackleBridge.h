@@ -15,6 +15,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) int score;
 @property (nonatomic) double equity;
 @property (nonatomic) int moveType; // 0=place, 1=exchange, 2=pass, 3=nonmove
+@property (nonatomic, copy) NSArray<QBTileInfo *> *placedTiles; // tiles placed on board (Place moves only)
 @end
 
 @interface QBHistoryEntry : NSObject

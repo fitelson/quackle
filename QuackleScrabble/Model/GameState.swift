@@ -7,6 +7,16 @@ struct TilePlacement: Equatable {
     let isBlank: Bool
 }
 
+struct AIAnimTile: Identifiable {
+    let id = UUID()
+    let letter: String
+    let isBlank: Bool
+    let points: Int
+    let targetRow: Int
+    let targetCol: Int
+    let rackIndex: Int  // which opponent rack slot this tile comes from
+}
+
 struct MoveHistoryEntry: Identifiable, Codable {
     let id: UUID
     let turn: Int
