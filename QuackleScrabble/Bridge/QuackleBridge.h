@@ -79,6 +79,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (int)historySize;
 - (NSArray<QBHistoryEntry *> *)moveHistory;
 
+// Current player index (0 or 1)
+- (int)currentPlayerIndex;
+
 // Save/Restore
 - (NSArray<NSString *> *)rackForPlayerIndex:(int)index;
 - (NSArray<NSString *> *)bagTiles;
@@ -92,6 +95,19 @@ NS_ASSUME_NONNULL_BEGIN
                      playerRacks:(NSArray<NSArray<NSString *> *> *)racks
                         bagTiles:(NSArray<NSString *> *)bag
             currentPlayerIsHuman:(BOOL)humanTurn;
+
+// Multiplayer (two human players)
+- (void)startNewTwoHumanGameWithPlayer1:(NSString *)name1
+                                player2:(NSString *)name2;
+
+- (void)restoreTwoHumanGameWithPlayer1:(NSString *)name1
+                               player2:(NSString *)name2
+                          boardLetters:(NSArray<NSArray<NSString *> *> *)boardLetters
+                           boardBlanks:(NSArray<NSArray<NSNumber *> *> *)boardBlanks
+                          playerScores:(NSArray<NSNumber *> *)scores
+                           playerRacks:(NSArray<NSArray<NSString *> *> *)racks
+                              bagTiles:(NSArray<NSString *> *)bag
+                    currentPlayerIndex:(int)currentIdx;
 
 @end
 

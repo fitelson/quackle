@@ -36,6 +36,12 @@ targets:
       - path: data
         type: folder
         buildPhase: resources
+    dependencies:
+      - sdk: GameKit.framework
+    entitlements:
+      path: QuackleScrabble/QuackleScrabble.entitlements
+      properties:
+        com.apple.developer.game-center: true
     settings:
       base:
         INFOPLIST_FILE: QuackleScrabble/Info.plist
@@ -43,6 +49,7 @@ targets:
         PRODUCT_NAME: Scrabble
         DEVELOPMENT_TEAM: Y9X24NP2Y3
         SWIFT_OBJC_BRIDGING_HEADER: QuackleScrabble-Bridging-Header.h
+        CODE_SIGN_ENTITLEMENTS: QuackleScrabble/QuackleScrabble.entitlements
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/libquackle
           - $(SRCROOT)/QuackleScrabble/Bridge

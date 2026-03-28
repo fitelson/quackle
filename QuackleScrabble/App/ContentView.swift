@@ -3,32 +3,40 @@ import SwiftUI
 struct ContentView: View {
     @Environment(QuackleEngine.self) var engine
 
+    @Environment(GameCenterManager.self) var gameCenterManager
+
     var body: some View {
-        if !engine.isInitialized {
-            VStack(spacing: 16) {
-                Text("Quackle")
-                    .font(.system(size: 28, weight: .bold))
+        Group {
+            if !engine.isInitialized {
+                VStack(spacing: 16) {
+                    Text("Quackle")
+                        .font(.system(size: 28, weight: .bold))
 
-                ProgressView(value: engine.loadingProgress)
-                    .progressViewStyle(.linear)
-                    .frame(width: 200)
+                    ProgressView(value: engine.loadingProgress)
+                        .progressViewStyle(.linear)
+                        .frame(width: 200)
 
-                Text(engine.loadingStatus)
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
+                    Text(engine.loadingStatus)
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
 
-                if let error = engine.errorMessage {
-                    Text(error)
-                        .font(.system(size: 13))
-                        .foregroundColor(.red)
+                    if let error = engine.errorMessage {
+                        Text(error)
+                            .font(.system(size: 13))
+                            .foregroundColor(.red)
+                    }
                 }
+                .padding()
+                #if os(macOS)
+                .frame(width: 500, height: 860)
+                #endif
+            } else if engine.showModeSelection {
+                ModeSelectionView()
+            } else if gameCenterManager.isWaitingForOpponent && engine.board.isEmpty {
+                WaitingForOpponentView()
+            } else {
+                GameView()
             }
-            .padding()
-            #if os(macOS)
-            .frame(width: 500, height: 860)
-            #endif
-        } else {
-            GameView()
         }
     }
 }
@@ -133,6 +141,12 @@ struct GameView: View {
                 AIAnimationOverlay()
                     .environment(engine)
                     .allowsHitTesting(false)
+            }
+        }
+        .overlay {
+            if engine.showHandoff {
+                HandoffView()
+                    .environment(engine)
             }
         }
         #if os(macOS)
@@ -390,5 +404,76 @@ struct SkillSliderView: View {
         #if os(macOS)
         .frame(width: 350, height: 180)
         #endif
+    }
+}
+
+struct WaitingForOpponentView: View {
+    @Environment(QuackleEngine.self) var engine
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer()
+
+            ProgressView()
+                .scaleEffect(1.5)
+
+            Text("Waiting for opponent...")
+                .font(.system(size: 20, weight: .semibold))
+
+            Text("They're making the first move")
+                .font(.system(size: 14))
+                .foregroundColor(.secondary)
+
+            Spacer()
+
+            Button("Cancel") {
+                engine.showModeSelection = true
+            }
+            .font(.system(size: 16))
+            .buttonStyle(.bordered)
+            .padding(.bottom, 40)
+        }
+        .padding()
+        #if os(macOS)
+        .frame(width: 500, height: 860)
+        #endif
+    }
+}
+
+struct HandoffView: View {
+    @Environment(QuackleEngine.self) var engine
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.92)
+                .ignoresSafeArea()
+
+            VStack(spacing: 20) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 48))
+                    .foregroundColor(.white)
+
+                Text("Hand device to")
+                    .font(.system(size: 18))
+                    .foregroundColor(.white.opacity(0.7))
+
+                Text(engine.handoffPlayerName)
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundColor(.white)
+
+                Button {
+                    engine.dismissHandoff()
+                } label: {
+                    Text("Ready")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 160, height: 50)
+                        .background(Color.blue)
+                        .cornerRadius(12)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 10)
+            }
+        }
     }
 }

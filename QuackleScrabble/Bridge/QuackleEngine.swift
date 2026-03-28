@@ -6,6 +6,12 @@ enum BonusType {
     case none, doubleLetter, tripleLetter, doubleWord, tripleWord
 }
 
+enum GameMode {
+    case ai
+    case multiplayer
+    case passAndPlay
+}
+
 struct TileModel: Identifiable, Equatable {
     let id = UUID()
     let letter: String
@@ -97,6 +103,27 @@ class QuackleEngine {
     var showMoves: Bool = false
     var topMoves: [MoveModel] = []
     var humanFirst: Bool = true
+    var showModeSelection: Bool = false
+
+    // Multiplayer state
+    var gameMode: GameMode = .ai
+    var localPlayerIndex: Int = 0
+    var multiplayerPlayer1ID: String = ""
+    var multiplayerPlayer2ID: String = ""
+    var consecutiveScorelessTurns: Int = 0
+    var onMultiplayerMoveCommitted: (() -> Void)?
+
+    // Pass & Play state
+    var showHandoff: Bool = false
+    var handoffPlayerName: String = ""
+
+    var isLocalPlayerTurn: Bool {
+        switch gameMode {
+        case .ai: return isHumanTurn
+        case .multiplayer: return Int(bridge.currentPlayerIndex()) == localPlayerIndex
+        case .passAndPlay: return true  // always the local player's turn
+        }
+    }
 
     // AI move animation state
     var isAnimatingAIMove: Bool = false
@@ -153,7 +180,7 @@ class QuackleEngine {
                 self.loadingProgress = 1.0
                 self.isInitialized = true
                 if !self.loadSavedGame() {
-                    self.startNewGame()
+                    self.showModeSelection = true
                 }
             }
         }
@@ -162,6 +189,8 @@ class QuackleEngine {
     func startNewGame() {
         UserDefaults.standard.removeObject(forKey: "savedGameState")
         bridge.startNewGame(withHumanName: "You", aiMeanLoss: skillMeanLoss, aiStdDev: skillStdDev)
+        gameMode = .ai
+        showModeSelection = false
         tentativePlacements = []
         moveHistory = []
         errorMessage = nil
@@ -169,9 +198,10 @@ class QuackleEngine {
         isAnimatingAIMove = false
         aiAnimTiles = []
         aiAnimPhase = 0
+        consecutiveScorelessTurns = 0
+        onMultiplayerMoveCommitted = nil
         refreshState()
         if !isHumanTurn {
-            // Delay AI's first move so the view renders before the board updates
             Task {
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 triggerAIIfNeeded()
@@ -182,7 +212,7 @@ class QuackleEngine {
     // MARK: - Drag and Drop
 
     func startDragFromRack(tile: TileModel) {
-        guard !isAnimatingAIMove else { return }
+        guard !isAnimatingAIMove, !showHandoff, isLocalPlayerTurn else { return }
         activeDragSource = .rack(tileId: tile.id)
         activeDragLetter = tile.isBlank ? "?" : tile.letter
         activeDragIsBlank = tile.isBlank
@@ -193,7 +223,7 @@ class QuackleEngine {
     }
 
     func startDragFromBoard(row: Int, col: Int) {
-        guard !isAnimatingAIMove else { return }
+        guard !isAnimatingAIMove, !showHandoff, isLocalPlayerTurn else { return }
         guard let placement = tentativeLetterAt(row: row, col: col) else { return }
         activeDragSource = .board(row: row, col: col)
         activeDragLetter = placement.isBlank ? placement.letter.lowercased() : placement.letter
@@ -387,8 +417,16 @@ class QuackleEngine {
             let committed = self.bridge.commitMove(moveString)
             if committed {
                 self.tentativePlacements = []
+                self.consecutiveScorelessTurns = 0
                 self.refreshState()
-                self.triggerAIIfNeeded()
+                switch self.gameMode {
+                case .multiplayer:
+                    self.onMultiplayerMoveCommitted?()
+                case .passAndPlay:
+                    self.triggerHandoff()
+                case .ai:
+                    self.triggerAIIfNeeded()
+                }
             } else {
                 self.errorMessage = "Invalid move: \(moveString)"
             }
@@ -516,7 +554,7 @@ class QuackleEngine {
 
     // MARK: - History
 
-    func showMoveHistory() {
+    private func refreshMoveHistory() {
         let entries = bridge.moveHistory()
         moveHistory = entries.map { entry in
             MoveHistoryEntry(
@@ -527,6 +565,10 @@ class QuackleEngine {
                 totalScore: Int(entry.totalScore)
             )
         }
+    }
+
+    func showMoveHistory() {
+        refreshMoveHistory()
         showHistory = true
     }
 
@@ -597,16 +639,26 @@ class QuackleEngine {
 
     func pass() {
         tentativePlacements = []
+        consecutiveScorelessTurns += 1
         bridge.commitPass()
         refreshState()
-        triggerAIIfNeeded()
+        switch gameMode {
+        case .multiplayer: onMultiplayerMoveCommitted?()
+        case .passAndPlay: triggerHandoff()
+        case .ai: triggerAIIfNeeded()
+        }
     }
 
     func exchangeTiles(_ tiles: String) {
         tentativePlacements = []
+        consecutiveScorelessTurns += 1
         bridge.commitExchange(withTiles: tiles)
         refreshState()
-        triggerAIIfNeeded()
+        switch gameMode {
+        case .multiplayer: onMultiplayerMoveCommitted?()
+        case .passAndPlay: triggerHandoff()
+        case .ai: triggerAIIfNeeded()
+        }
     }
 
     private func triggerAIIfNeeded() {
@@ -717,36 +769,70 @@ class QuackleEngine {
         }
         board = newBoard
 
-        // Determine humanFirst from the bridge (player 0's name)
-        humanFirst = (bridge.name(forPlayerIndex: 0) == "You")
-        let humanIndex: Int32 = humanFirst ? 0 : 1
-        let aiIndex: Int32 = humanFirst ? 1 : 0
+        if gameMode == .multiplayer || gameMode == .passAndPlay {
+            let numPlayers = Int(bridge.numberOfPlayers())
+            var newPlayers: [PlayerModel] = []
+            for i in 0..<numPlayers {
+                newPlayers.append(PlayerModel(
+                    name: bridge.name(forPlayerIndex: Int32(i)),
+                    score: Int(bridge.score(forPlayerIndex: Int32(i)))
+                ))
+            }
+            players = newPlayers
 
-        let rackLetters = bridge.rack(forPlayerIndex: humanIndex) as [String]
-        rack = rackLetters.map { letter in
-            TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
+            currentPlayerName = bridge.currentPlayerName()
+            isHumanTurn = true  // both players are human
+            isGameOver = bridge.isGameOver()
+            tilesInBag = Int(bridge.tilesRemainingInBag())
+            turnNumber = Int(bridge.turnNumber())
+
+            if gameMode == .multiplayer {
+                let myIndex = Int32(localPlayerIndex)
+                let opponentIndex: Int32 = localPlayerIndex == 0 ? 1 : 0
+                let rackLetters = bridge.rack(forPlayerIndex: myIndex) as [String]
+                rack = rackLetters.map { letter in
+                    TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
+                }
+                updateAvailableRack()
+                opponentTileCount = (bridge.rack(forPlayerIndex: opponentIndex) as [String]).count
+                refreshMoveHistory()
+            } else {
+                // Pass & Play: rack set by refreshPassAndPlayState after handoff dismiss
+                refreshPassAndPlayState()
+                refreshMoveHistory()
+            }
+        } else {
+            // Determine humanFirst from the bridge (player 0's name)
+            humanFirst = (bridge.name(forPlayerIndex: 0) == "You")
+            let humanIndex: Int32 = humanFirst ? 0 : 1
+            let aiIndex: Int32 = humanFirst ? 1 : 0
+
+            let rackLetters = bridge.rack(forPlayerIndex: humanIndex) as [String]
+            rack = rackLetters.map { letter in
+                TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
+            }
+            updateAvailableRack()
+
+            let numPlayers = Int(bridge.numberOfPlayers())
+            var newPlayers: [PlayerModel] = []
+            for i in 0..<numPlayers {
+                newPlayers.append(PlayerModel(
+                    name: bridge.name(forPlayerIndex: Int32(i)),
+                    score: Int(bridge.score(forPlayerIndex: Int32(i)))
+                ))
+            }
+            players = newPlayers
+
+            currentPlayerName = bridge.currentPlayerName()
+            isHumanTurn = bridge.isCurrentPlayerHuman()
+            isGameOver = bridge.isGameOver()
+            tilesInBag = Int(bridge.tilesRemainingInBag())
+            opponentTileCount = (bridge.rack(forPlayerIndex: aiIndex) as [String]).count
+            turnNumber = Int(bridge.turnNumber())
+
+            // Auto-save after each state change (AI mode only)
+            saveGameState()
         }
-        updateAvailableRack()
-
-        let numPlayers = Int(bridge.numberOfPlayers())
-        var newPlayers: [PlayerModel] = []
-        for i in 0..<numPlayers {
-            newPlayers.append(PlayerModel(
-                name: bridge.name(forPlayerIndex: Int32(i)),
-                score: Int(bridge.score(forPlayerIndex: Int32(i)))
-            ))
-        }
-        players = newPlayers
-
-        currentPlayerName = bridge.currentPlayerName()
-        isHumanTurn = bridge.isCurrentPlayerHuman()
-        isGameOver = bridge.isGameOver()
-        tilesInBag = Int(bridge.tilesRemainingInBag())
-        opponentTileCount = (bridge.rack(forPlayerIndex: aiIndex) as [String]).count
-        turnNumber = Int(bridge.turnNumber())
-
-        // Auto-save after each state change
-        saveGameState()
     }
 
     // MARK: - Save/Restore
@@ -797,6 +883,9 @@ class QuackleEngine {
             return false
         }
 
+        gameMode = .ai
+        showModeSelection = false
+
         // Restore skill level before computing meanLoss/stdDev
         skillLevel = state.skillLevel
 
@@ -844,5 +933,147 @@ class QuackleEngine {
 
         print("[QuackleEngine] Restored saved game")
         return true
+    }
+
+    // MARK: - Pass & Play
+
+    func startPassAndPlayGame(player1Name: String, player2Name: String) {
+        bridge.startNewTwoHumanGame(withPlayer1: player1Name, player2: player2Name)
+        gameMode = .passAndPlay
+        showModeSelection = false
+        tentativePlacements = []
+        moveHistory = []
+        errorMessage = nil
+        lastMoveDescription = ""
+        consecutiveScorelessTurns = 0
+        isAnimatingAIMove = false
+        aiAnimTiles = []
+        aiAnimPhase = 0
+        showHandoff = false
+        refreshState()
+    }
+
+    private func triggerHandoff() {
+        guard !isGameOver else { return }
+        handoffPlayerName = bridge.currentPlayerName()
+        showHandoff = true
+    }
+
+    func dismissHandoff() {
+        showHandoff = false
+        refreshPassAndPlayState()
+    }
+
+    private func refreshPassAndPlayState() {
+        // Show the current player's rack (whoever's turn it is)
+        let currentIdx = Int32(bridge.currentPlayerIndex())
+        let otherIdx: Int32 = currentIdx == 0 ? 1 : 0
+
+        let rackLetters = bridge.rack(forPlayerIndex: currentIdx) as [String]
+        rack = rackLetters.map { letter in
+            TileModel(letter: letter, points: TileModel.tilePoints[letter] ?? 0, isBlank: letter == "?")
+        }
+        updateAvailableRack()
+        opponentTileCount = (bridge.rack(forPlayerIndex: otherIdx) as [String]).count
+    }
+
+    // MARK: - Multiplayer
+
+    func startMultiplayerGame(
+        player1Name: String,
+        player2Name: String,
+        localPlayerIndex: Int,
+        player1GameCenterID: String,
+        player2GameCenterID: String
+    ) {
+        bridge.startNewTwoHumanGame(withPlayer1: player1Name, player2: player2Name)
+        gameMode = .multiplayer
+        showModeSelection = false
+        self.localPlayerIndex = localPlayerIndex
+        multiplayerPlayer1ID = player1GameCenterID
+        multiplayerPlayer2ID = player2GameCenterID
+        tentativePlacements = []
+        moveHistory = []
+        errorMessage = nil
+        lastMoveDescription = ""
+        consecutiveScorelessTurns = 0
+        isAnimatingAIMove = false
+        aiAnimTiles = []
+        aiAnimPhase = 0
+        refreshState()
+    }
+
+    func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int) {
+        let boardLetters: [[String]] = state.board.map { row in
+            row.map { tile in tile?.letter ?? "" }
+        }
+        let boardBlanks: [[NSNumber]] = state.board.map { row in
+            row.map { tile in NSNumber(value: tile?.isBlank ?? false) }
+        }
+
+        let scores = state.playerScores.map { NSNumber(value: $0) }
+        let racks = state.playerRacks
+
+        bridge.restoreTwoHumanGame(
+            withPlayer1: state.player1DisplayName,
+            player2: state.player2DisplayName,
+            boardLetters: boardLetters,
+            boardBlanks: boardBlanks,
+            playerScores: scores,
+            playerRacks: racks,
+            bagTiles: state.bag,
+            currentPlayerIndex: Int32(state.currentPlayerIndex)
+        )
+
+        gameMode = .multiplayer
+        showModeSelection = false
+        self.localPlayerIndex = localPlayerIndex
+        multiplayerPlayer1ID = state.player1GameCenterID
+        multiplayerPlayer2ID = state.player2GameCenterID
+        moveHistory = state.moveHistory
+        consecutiveScorelessTurns = state.consecutiveScorelessTurns
+        tentativePlacements = []
+        errorMessage = nil
+        isAnimatingAIMove = false
+        refreshState()
+
+        if state.isGameOver {
+            isGameOver = true
+        }
+    }
+
+    func exportMultiplayerState() -> MultiplayerGameState {
+        let savedBoard: [[SavedTile?]] = board.map { row in
+            row.map { square in
+                guard let letter = square.letter else { return nil }
+                return SavedTile(letter: letter, isBlank: square.isBlank)
+            }
+        }
+
+        let numPlayers = Int(bridge.numberOfPlayers())
+        var scores: [Int] = []
+        var racks: [[String]] = []
+        for i in 0..<numPlayers {
+            scores.append(Int(bridge.score(forPlayerIndex: Int32(i))))
+            racks.append(bridge.rack(forPlayerIndex: Int32(i)) as [String])
+        }
+
+        let bag = bridge.bagTiles() as [String]
+        let currentIdx = Int(bridge.currentPlayerIndex())
+
+        return MultiplayerGameState(
+            player1GameCenterID: multiplayerPlayer1ID,
+            player2GameCenterID: multiplayerPlayer2ID,
+            player1DisplayName: bridge.name(forPlayerIndex: 0),
+            player2DisplayName: bridge.name(forPlayerIndex: 1),
+            board: savedBoard,
+            playerScores: scores,
+            playerRacks: racks,
+            bag: bag,
+            currentPlayerIndex: currentIdx,
+            moveHistory: moveHistory,
+            isGameOver: isGameOver,
+            consecutiveScorelessTurns: consecutiveScorelessTurns
+        )
     }
 }

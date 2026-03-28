@@ -2,10 +2,14 @@ import SwiftUI
 
 struct MoveInputView: View {
     @Environment(QuackleEngine.self) var engine
+    @Environment(GameCenterManager.self) var gameCenterManager
     @State private var showPassConfirmation = false
     @State private var showNewGameAlert = false
+    @State private var showForfeitAlert = false
 
     var body: some View {
+        let canAct = engine.isLocalPlayerTurn && !engine.isGameOver
+
         VStack(spacing: 8) {
             // Row 1: Moves, History, Skill, New
             HStack(spacing: 10) {
@@ -14,7 +18,7 @@ struct MoveInputView: View {
                 }
                 .font(.system(size: 15))
                 .buttonStyle(.bordered)
-                .disabled(!engine.isHumanTurn || engine.isGameOver)
+                .disabled(!canAct)
 
                 Button("History") {
                     engine.showMoveHistory()
@@ -22,14 +26,20 @@ struct MoveInputView: View {
                 .font(.system(size: 15))
                 .buttonStyle(.bordered)
 
-                Button("Skill") {
-                    engine.showSkillSlider = true
+                if engine.gameMode == .ai {
+                    Button("Skill") {
+                        engine.showSkillSlider = true
+                    }
+                    .font(.system(size: 15))
+                    .buttonStyle(.bordered)
                 }
-                .font(.system(size: 15))
-                .buttonStyle(.bordered)
 
                 Button("New") {
-                    showNewGameAlert = true
+                    if engine.gameMode == .multiplayer && !engine.isGameOver {
+                        showForfeitAlert = true
+                    } else {
+                        showNewGameAlert = true
+                    }
                 }
                 .font(.system(size: 15))
                 .buttonStyle(.bordered)
@@ -48,14 +58,14 @@ struct MoveInputView: View {
                 }
                 .font(.system(size: 15))
                 .buttonStyle(.bordered)
-                .disabled(!engine.isHumanTurn || engine.isGameOver || engine.tilesInBag < 7)
+                .disabled(!canAct || engine.tilesInBag < 7)
 
                 Button("Pass") {
                     showPassConfirmation = true
                 }
                 .font(.system(size: 15))
                 .buttonStyle(.bordered)
-                .disabled(!engine.isHumanTurn || engine.isGameOver)
+                .disabled(!canAct)
             }
         }
         .alert("Pass Turn?", isPresented: $showPassConfirmation) {
@@ -68,11 +78,19 @@ struct MoveInputView: View {
         }
         .alert("New Game", isPresented: $showNewGameAlert) {
             Button("Start New Game", role: .destructive) {
-                engine.startNewGame()
+                engine.showModeSelection = true
             }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("Are you sure you want to start a new game? Current game will be lost.")
+        }
+        .alert("Forfeit Match?", isPresented: $showForfeitAlert) {
+            Button("Forfeit", role: .destructive) {
+                gameCenterManager.forfeitMatch()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Are you sure you want to forfeit this online match?")
         }
     }
 }

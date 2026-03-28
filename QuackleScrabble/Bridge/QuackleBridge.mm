@@ -460,6 +460,11 @@ static std::string nsToStd(NSString *s) {
     return result;
 }
 
+- (int)currentPlayerIndex {
+    if (!_game || !_game->hasPositions()) return 0;
+    return _game->currentPosition().currentPlayer().id();
+}
+
 #pragma mark - Save/Restore
 
 - (NSArray<NSString *> *)rackForPlayerIndex:(int)index {
@@ -591,6 +596,111 @@ static std::string nsToStd(NSString *s) {
     NSLog(@"QuackleBridge: Game restored — %@ vs AI, bag=%d tiles, %@ to play",
           name, (int)_game->currentPosition().bag().size(),
           humanTurn ? name : @"AI");
+}
+
+#pragma mark - Multiplayer (Two Human Players)
+
+- (void)startNewTwoHumanGameWithPlayer1:(NSString *)name1
+                                player2:(NSString *)name2 {
+    delete _game;
+    _game = new Game;
+
+    PlayerList players;
+    Player p1(MARK_UV(nsToStd(name1)), Player::HumanPlayerType, 0);
+    Player p2(MARK_UV(nsToStd(name2)), Player::HumanPlayerType, 1);
+    players.push_back(p1);
+    players.push_back(p2);
+
+    _game->setPlayers(players);
+    _game->addPosition();
+
+    NSLog(@"QuackleBridge: New two-human game started — %@ vs %@", name1, name2);
+}
+
+- (void)restoreTwoHumanGameWithPlayer1:(NSString *)name1
+                               player2:(NSString *)name2
+                          boardLetters:(NSArray<NSArray<NSString *> *> *)boardLetters
+                           boardBlanks:(NSArray<NSArray<NSNumber *> *> *)boardBlanks
+                          playerScores:(NSArray<NSNumber *> *)scores
+                           playerRacks:(NSArray<NSArray<NSString *> *> *)racks
+                              bagTiles:(NSArray<NSString *> *)bagTileLetters
+                    currentPlayerIndex:(int)currentIdx {
+    delete _game;
+    _game = new Game;
+
+    PlayerList players;
+    Player p1(MARK_UV(nsToStd(name1)), Player::HumanPlayerType, 0);
+    Player p2(MARK_UV(nsToStd(name2)), Player::HumanPlayerType, 1);
+
+    if ((int)scores.count > 0) p1.setScore([scores[0] intValue]);
+    if ((int)scores.count > 1) p2.setScore([scores[1] intValue]);
+
+    players.push_back(p1);
+    players.push_back(p2);
+
+    _game->setPlayers(players);
+    _game->addPosition();
+
+    // Restore board
+    Board board;
+    board.prepareEmptyBoard();
+
+    int rows = (int)boardLetters.count;
+    for (int row = 0; row < rows; ++row) {
+        NSArray<NSString *> *rowLetters = boardLetters[row];
+        NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
+        int cols = (int)rowLetters.count;
+        for (int col = 0; col < cols; ++col) {
+            NSString *letter = rowLetters[col];
+            if (letter.length == 0) continue;
+
+            BOOL isBlank = [rowBlanks[col] boolValue];
+            std::string letterStr;
+            if (isBlank) {
+                letterStr = std::string(1, tolower([letter UTF8String][0]));
+            } else {
+                letterStr = nsToStd(letter);
+            }
+
+            std::string pos = std::to_string(row + 1) + std::string(1, char('A' + col));
+            LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(letterStr));
+            Move move = Move::createPlaceMove(MARK_UV(pos), encoded);
+            board.makeMove(move);
+        }
+    }
+
+    _game->currentPosition().setBoard(board);
+    _game->currentPosition().ensureBoardIsPreparedForAnalysis();
+
+    // Restore bag
+    LongLetterString bagLong;
+    for (NSString *letter in bagTileLetters) {
+        LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(nsToStd(letter)));
+        for (unsigned int i = 0; i < encoded.length(); ++i)
+            bagLong += encoded[i];
+    }
+    Bag restoredBag;
+    restoredBag.clear();
+    restoredBag.toss(bagLong);
+    _game->currentPosition().setBag(restoredBag);
+
+    // Restore player racks
+    for (int i = 0; i < (int)racks.count && i < (int)_game->currentPosition().players().size(); ++i) {
+        NSArray<NSString *> *rackLetters = racks[i];
+        LetterString rackTiles;
+        for (NSString *letter in rackLetters) {
+            LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(nsToStd(letter)));
+            rackTiles += encoded;
+        }
+        int playerId = _game->currentPosition().players()[i].id();
+        _game->currentPosition().setPlayerRack(playerId, Rack(rackTiles), false);
+    }
+
+    // Set current player
+    _game->currentPosition().setCurrentPlayer(currentIdx);
+
+    NSLog(@"QuackleBridge: Two-human game restored — %@ vs %@, bag=%d tiles, player %d to play",
+          name1, name2, (int)_game->currentPosition().bag().size(), currentIdx);
 }
 
 @end

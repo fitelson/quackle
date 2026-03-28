@@ -38,6 +38,10 @@ struct ScoreboardView: View {
                     Text("GAME OVER")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.red)
+                } else if engine.gameMode == .multiplayer {
+                    Text(engine.isLocalPlayerTurn ? "Your turn" : "Waiting...")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(engine.isLocalPlayerTurn ? .green : .orange)
                 }
                 Spacer()
                 Text("Turn \(engine.turnNumber)")
