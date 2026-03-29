@@ -213,7 +213,8 @@ class QuackleEngine {
         aiAnimTiles = []
         aiAnimPhase = 0
         consecutiveScorelessTurns = 0
-        onMultiplayerMoveCommitted = nil
+        // NOTE: Do NOT clear onMultiplayerMoveCommitted here — it must survive
+        // across game mode switches so multiplayer moves always get submitted.
         refreshState()
         if !isHumanTurn {
             Task {

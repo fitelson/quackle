@@ -38,13 +38,18 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Lexicon: CSW19
 - GameMode enum: .ai (vs computer), .multiplayer (via Game Center), .passAndPlay (two humans, one device)
 - Multiplayer uses GKTurnBasedMatch with programmatic auto-match (GKTurnBasedMatch.find(for:)), no matchmaker UI
-- findOrCreateMatch() only removes ended/finished matches; reuses open matches (pending or in-progress) to preserve auto-match pairing
+- findOrCreateMatch() removes ended/finished/quit/forfeited matches; reuses open matches (pending or in-progress) to preserve auto-match pairing
+- findOrCreateMatch() also skips matches in forfeitedMatchIDs set (prevents GC propagation-delay from resurrecting forfeited matches)
 - Only the currentParticipant initializes a new match; the other player waits for first move
 - Opponent display names resolved from match participants when loading state (handles late-join)
 - GameCenterManager conforms to GKLocalPlayerListener for turn event callbacks
 - receivedTurnEventFor only clears isWaitingForOpponent when match data exists (prevents spurious callback race)
 - Both WaitingForOpponentView and GameView poll Game Center every 3s via `.task`-based async loops (auto-cancelled when conditions change)
-- QuackleEngine.onMultiplayerMoveCommitted callback wired in QuackleScrabbleApp to submit turns (weak captures to avoid retain cycle)
+- Polling uses loadMatches() instead of load(withID:) to avoid stale cached data
+- Poll checks match status (.open) and participant outcomes (.quit) to detect forfeit/end
+- onMultiplayerMoveCommitted callback: initial setup in QuackleScrabbleApp, re-wired by ensureMultiplayerCallback() in handleMatchFound
+- ensureMultiplayerCallback() guarantees the callback is set every time a multiplayer game is entered — survives game-mode switches
+- startNewGame() must NOT clear onMultiplayerMoveCommitted (was a critical bug: callback went nil after AI game, causing multiplayer moves to silently not submit)
 - isLocalPlayerTurn is a stored property updated in refreshState(), not computed (bridge calls aren't tracked by @Observable)
 - Multiplayer move history managed via MultiplayerGameState serialization, not bridge (bridge only has moves since last restore)
 - appendLatestMoveToHistory() reads bridge history post-commit and appends to accumulated moveHistory
@@ -65,6 +70,11 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Turn event callbacks (receivedTurnEventFor, matchEnded) only switch to multiplayer when already in multiplayer mode; otherwise silently update match reference
 - loadActiveMatch() called after Game Center authentication; queries for open matches so "Resume Online Game" works across app restarts and devices
 - Same online game can be open on multiple devices (iPhone + Mac) — Game Center match data is server-side; both see same state
+- submitTurn retries up to 3 times with exponential backoff; re-fetches fresh match on retries
+- pendingTurnData persisted to UserDefaults — survives app restart; retried on app foreground and after loadActiveMatch
+- forfeitMatch refreshes match from GC before quitting (avoids stale participant state); only clears local state on success
+- handleMatchEnded navigates straight to mode selection (not stuck on dead game board)
+- forfeitedMatchIDs (in-memory Set) prevents re-finding a just-forfeited match before GC propagates the quit
 - QuackleBridge critical methods (startNewGame, haveComputerPlay, kibitzMoves, commitMove, restore*, moveHistory) are wrapped in C++ try/catch to prevent exceptions from crossing the ObjC boundary
 - QuackleEngine uses a serial `bridgeQueue` (DispatchQueue) for background bridge work (init, AI play) via `withCheckedContinuation`, avoiding `Task.detached`
 - AI/opponent move animations tracked via `animationTask` property; previous animation cancelled before starting new one
@@ -73,6 +83,10 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - RNG in haveComputerPlay seeded via `std::random_device` (not `std::time`)
 - loadMatchState tracks matched players with flags to prevent double-assignment when player2GameCenterID is empty
 - forfeitMatch uses do/catch with error reporting (not silent try?)
+- Sheets use single `.sheet(item:)` with `ActiveSheet` enum (blankPicker, topMoves, history, skillSlider) — never multiple `.sheet(isPresented:)` on the same view
+- Saved AI game cleared on app version change (CFBundleVersion compared via UserDefaults "lastAppBuild")
+- QuackleBridge marked `@unchecked Sendable` (thread-safe via bridgeQueue serialization)
+- `_UIReparentingView` console warning is a known SwiftUI framework bug with Menu on iOS — not fixable from app code, safe to ignore
 - BlankPickerView sets engine state directly (no dismiss()+asyncAfter delay)
 - buildMoveString uses guard-let for UnicodeScalar (no force unwrap)
 - Module name is "Scrabble" (matches PRODUCT_NAME), use `@testable import Scrabble` in tests

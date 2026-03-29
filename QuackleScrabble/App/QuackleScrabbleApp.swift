@@ -27,6 +27,8 @@ struct QuackleScrabbleApp: App {
                 if engine.gameMode == .ai {
                     engine.saveGameState()
                 }
+            } else if phase == .active {
+                gameCenterManager.retryPendingTurn()
             }
         }
     }
