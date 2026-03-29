@@ -37,7 +37,7 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Lexicon: CSW19
 - GameMode enum: .ai (vs computer), .multiplayer (via Game Center), .passAndPlay (two humans, one device)
 - Multiplayer uses GKTurnBasedMatch with programmatic auto-match (GKTurnBasedMatch.find(for:)), no matchmaker UI
-- findOrCreateMatch() always removes all existing matches then starts fresh auto-match (no resume logic)
+- findOrCreateMatch() only removes ended/finished matches; reuses open matches (pending or in-progress) to preserve auto-match pairing
 - Only the currentParticipant initializes a new match; the other player waits for first move
 - Opponent display names resolved from match participants when loading state (handles late-join)
 - GameCenterManager conforms to GKLocalPlayerListener for turn event callbacks

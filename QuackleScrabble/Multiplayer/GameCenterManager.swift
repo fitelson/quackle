@@ -47,15 +47,38 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         Task {
             defer { self.isFinding = false }
             do {
-                // 1. Remove all existing matches (stale, finished, or abandoned)
                 let matches = try await GKTurnBasedMatch.loadMatches()
-                print("[GameCenter] Found \(matches.count) existing matches, removing all")
+                print("[GameCenter] Found \(matches.count) existing matches")
+
                 for match in matches {
-                    print("[GameCenter]   removing match status=\(match.status.rawValue)")
-                    try? await match.remove()
+                    let hasData = match.matchData != nil && !(match.matchData?.isEmpty ?? true)
+                    print("[GameCenter]   status=\(match.status.rawValue) hasData=\(hasData)")
+
+                    if match.status != .open {
+                        // Ended/unknown — clean up
+                        print("[GameCenter]   removing non-open match")
+                        try? await match.remove()
+                        continue
+                    }
+
+                    if hasData {
+                        // Open match with data — check if game is over
+                        if let data = match.matchData,
+                           let state = try? JSONDecoder().decode(MultiplayerGameState.self, from: data),
+                           state.isGameOver {
+                            print("[GameCenter]   removing finished match")
+                            try? await match.remove()
+                            continue
+                        }
+                    }
+
+                    // Open match (pending or in-progress) — use it
+                    print("[GameCenter]   using existing open match")
+                    self.handleMatchFound(match)
+                    return
                 }
 
-                // 2. Programmatic auto-match (no UI)
+                // No existing match — auto-match
                 print("[GameCenter] Starting programmatic auto-match...")
                 let request = GKMatchRequest()
                 request.minPlayers = 2
