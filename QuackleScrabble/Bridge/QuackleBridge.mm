@@ -292,6 +292,49 @@ static std::string nsToStd(NSString *s) {
     return result;
 }
 
+- (int)scoreMoveString:(NSString *)moveString {
+    if (!_game || !_game->hasPositions()) return 0;
+
+    std::string str = nsToStd(moveString);
+    size_t spacePos = str.find(' ');
+    if (spacePos == std::string::npos) return 0;
+
+    std::string position = str.substr(0, spacePos);
+    std::string word = str.substr(spacePos + 1);
+    if (position.empty() || word.empty()) return 0;
+
+    LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
+    Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
+
+    int validity = _game->currentPosition().validateMove(move);
+    if (validity != 0) return 0;
+
+    _game->currentPosition().scoreMove(move);
+    return move.score;
+}
+
+- (int)scoreMoveStringIgnoringRack:(NSString *)moveString {
+    if (!_game || !_game->hasPositions()) return 0;
+
+    std::string str = nsToStd(moveString);
+    size_t spacePos = str.find(' ');
+    if (spacePos == std::string::npos) return 0;
+
+    std::string position = str.substr(0, spacePos);
+    std::string word = str.substr(spacePos + 1);
+    if (position.empty() || word.empty()) return 0;
+
+    LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
+    Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
+
+    // Ignore InvalidTiles (0x0001) — allow hypothetical moves with tiles not on rack
+    int validity = _game->currentPosition().validateMove(move);
+    if ((validity & ~0x0001) != 0) return 0;
+
+    _game->currentPosition().scoreMove(move);
+    return move.score;
+}
+
 - (BOOL)commitMoveString:(NSString *)moveString {
     if (!_game || !_game->hasPositions()) return NO;
 

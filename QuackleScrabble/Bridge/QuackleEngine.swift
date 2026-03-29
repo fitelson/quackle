@@ -75,6 +75,7 @@ class QuackleEngine {
     var tentativePlacements: [TilePlacement] = []
     var availableRack: [TileModel] = []  // rack minus placed tiles
     var isTentativeMoveValid: Bool = false  // real-time validation
+    var tentativeMoveScore: Int = 0  // score preview for valid tentative move
     var tentativeMoveString: String? = nil  // the built move string
     var showBlankPicker: Bool = false  // show letter picker for blank tile
     var pendingBlankRow: Int = -1
@@ -117,13 +118,7 @@ class QuackleEngine {
     var showHandoff: Bool = false
     var handoffPlayerName: String = ""
 
-    var isLocalPlayerTurn: Bool {
-        switch gameMode {
-        case .ai: return isHumanTurn
-        case .multiplayer: return Int(bridge.currentPlayerIndex()) == localPlayerIndex
-        case .passAndPlay: return true  // always the local player's turn
-        }
-    }
+    var isLocalPlayerTurn: Bool = true
 
     // AI move animation state
     var isAnimatingAIMove: Bool = false
@@ -132,7 +127,7 @@ class QuackleEngine {
     var opponentRackOrigin: CGPoint = .zero  // top-left of opponent rack in "game" space
     var opponentTileSize: CGFloat = 24
 
-    private let bridge = QuackleBridge.shared()
+    private let bridge: QuackleBridge = QuackleBridge.shared()
 
     func initialize() {
         guard let dataPath = Bundle.main.path(forResource: "data", ofType: nil) else {
@@ -212,7 +207,8 @@ class QuackleEngine {
     // MARK: - Drag and Drop
 
     func startDragFromRack(tile: TileModel) {
-        guard !isAnimatingAIMove, !showHandoff, isLocalPlayerTurn else { return }
+        let canDrag = isLocalPlayerTurn || (gameMode == .multiplayer && !isLocalPlayerTurn)
+        guard !isAnimatingAIMove, !showHandoff, canDrag else { return }
         activeDragSource = .rack(tileId: tile.id)
         activeDragLetter = tile.isBlank ? "?" : tile.letter
         activeDragIsBlank = tile.isBlank
@@ -223,7 +219,8 @@ class QuackleEngine {
     }
 
     func startDragFromBoard(row: Int, col: Int) {
-        guard !isAnimatingAIMove, !showHandoff, isLocalPlayerTurn else { return }
+        let canDrag = isLocalPlayerTurn || (gameMode == .multiplayer && !isLocalPlayerTurn)
+        guard !isAnimatingAIMove, !showHandoff, canDrag else { return }
         guard let placement = tentativeLetterAt(row: row, col: col) else { return }
         activeDragSource = .board(row: row, col: col)
         activeDragLetter = placement.isBlank ? placement.letter.lowercased() : placement.letter
@@ -363,6 +360,7 @@ class QuackleEngine {
         tentativePlacements = []
         updateAvailableRack()
         isTentativeMoveValid = false
+        tentativeMoveScore = 0
         tentativeMoveString = nil
     }
 
@@ -379,6 +377,7 @@ class QuackleEngine {
     private func validateTentativeMove() {
         guard !tentativePlacements.isEmpty else {
             isTentativeMoveValid = false
+            tentativeMoveScore = 0
             tentativeMoveString = nil
             return
         }
@@ -386,11 +385,20 @@ class QuackleEngine {
         if let moveStr = buildMoveString() {
             tentativeMoveString = moveStr
             let validity = bridge.validateMove(moveStr)
-            isTentativeMoveValid = (validity == 0)
-            print("[Validate] '\(moveStr)' -> validity=\(validity) valid=\(isTentativeMoveValid)")
+            let isHypothetical = gameMode == .multiplayer && !isLocalPlayerTurn
+            if isHypothetical {
+                // Ignore rack check (bit 0x0001) for hypothetical moves
+                isTentativeMoveValid = (validity & ~0x0001) == 0
+                tentativeMoveScore = isTentativeMoveValid ? Int(bridge.scoreMoveStringIgnoringRack(moveStr)) : 0
+            } else {
+                isTentativeMoveValid = (validity == 0)
+                tentativeMoveScore = isTentativeMoveValid ? Int(bridge.scoreMove(moveStr)) : 0
+            }
+            print("[Validate] '\(moveStr)' -> validity=\(validity) valid=\(isTentativeMoveValid) score=\(tentativeMoveScore) hypothetical=\(isHypothetical)")
         } else {
             tentativeMoveString = nil
             isTentativeMoveValid = false
+            tentativeMoveScore = 0
             print("[Validate] Could not build move string from \(tentativePlacements.count) tiles")
         }
     }
@@ -421,6 +429,7 @@ class QuackleEngine {
                 self.refreshState()
                 switch self.gameMode {
                 case .multiplayer:
+                    self.appendLatestMoveToHistory()
                     self.onMultiplayerMoveCommitted?()
                 case .passAndPlay:
                     self.triggerHandoff()
@@ -460,8 +469,8 @@ class QuackleEngine {
 
         if horizontal {
             let row = sorted[0].row
-            let minCol = sorted.map(\.col).min()!
-            let maxCol = sorted.map(\.col).max()!
+            let minCol = sorted.map { $0.col }.min()!
+            let maxCol = sorted.map { $0.col }.max()!
 
             // Extend left to include adjacent board tiles
             var sc = minCol
@@ -476,7 +485,9 @@ class QuackleEngine {
             // Build word
             var word = ""
             for c in sc...ec {
-                if let placement = tentativePlacements.first(where: { $0.row == row && $0.col == c }) {
+                let matchRow = row
+                let matchCol = c
+                if let placement = tentativePlacements.first(where: { $0.row == matchRow && $0.col == matchCol }) {
                     // Blank tiles use lowercase
                     word += placement.isBlank ? placement.letter.lowercased() : placement.letter
                 } else if board[row][c].letter != nil {
@@ -488,13 +499,14 @@ class QuackleEngine {
             }
 
             // Position string: row (1-indexed) + column letter, e.g. "8H"
-            let posString = "\(startRow + 1)\(String(UnicodeScalar(65 + startCol)!))"
+            let colLetter = String(UnicodeScalar(65 + startCol)!)
+            let posString = "\(startRow + 1)\(colLetter)"
             return "\(posString) \(word)"
 
         } else {
             let col = sorted[0].col
-            let minRow = sorted.map(\.row).min()!
-            let maxRow = sorted.map(\.row).max()!
+            let minRow = sorted.map { $0.row }.min()!
+            let maxRow = sorted.map { $0.row }.max()!
 
             // Extend up
             var sr = minRow
@@ -509,7 +521,9 @@ class QuackleEngine {
             // Build word
             var word = ""
             for r in sr...er {
-                if let placement = tentativePlacements.first(where: { $0.row == r && $0.col == col }) {
+                let matchRow = r
+                let matchCol = col
+                if let placement = tentativePlacements.first(where: { $0.row == matchRow && $0.col == matchCol }) {
                     word += placement.isBlank ? placement.letter.lowercased() : placement.letter
                 } else if board[r][col].letter != nil {
                     word += "."
@@ -519,7 +533,8 @@ class QuackleEngine {
             }
 
             // Vertical: column letter + row, e.g. "H8"
-            let posString = "\(String(UnicodeScalar(65 + startCol)!))\(startRow + 1)"
+            let colLetter = String(UnicodeScalar(65 + startCol)!)
+            let posString = "\(colLetter)\(startRow + 1)"
             return "\(posString) \(word)"
         }
     }
@@ -567,8 +582,29 @@ class QuackleEngine {
         }
     }
 
+    /// Read the bridge's history (which only has moves since last restore)
+    /// and append any new entries to the accumulated moveHistory.
+    private func appendLatestMoveToHistory() {
+        let entries = bridge.moveHistory()
+        for entry in entries {
+            let newEntry = MoveHistoryEntry(
+                turn: Int(entry.turn),
+                playerName: entry.playerName,
+                moveDescription: entry.moveDescription,
+                score: Int(entry.score),
+                totalScore: Int(entry.totalScore)
+            )
+            // Only append if not already present (match on turn + playerName)
+            if !moveHistory.contains(where: { $0.turn == newEntry.turn && $0.playerName == newEntry.playerName }) {
+                moveHistory.append(newEntry)
+            }
+        }
+    }
+
     func showMoveHistory() {
-        refreshMoveHistory()
+        if gameMode != .multiplayer {
+            refreshMoveHistory()
+        }
         showHistory = true
     }
 
@@ -643,7 +679,9 @@ class QuackleEngine {
         bridge.commitPass()
         refreshState()
         switch gameMode {
-        case .multiplayer: onMultiplayerMoveCommitted?()
+        case .multiplayer:
+            appendLatestMoveToHistory()
+            onMultiplayerMoveCommitted?()
         case .passAndPlay: triggerHandoff()
         case .ai: triggerAIIfNeeded()
         }
@@ -655,7 +693,9 @@ class QuackleEngine {
         bridge.commitExchange(withTiles: tiles)
         refreshState()
         switch gameMode {
-        case .multiplayer: onMultiplayerMoveCommitted?()
+        case .multiplayer:
+            appendLatestMoveToHistory()
+            onMultiplayerMoveCommitted?()
         case .passAndPlay: triggerHandoff()
         case .ai: triggerAIIfNeeded()
         }
@@ -787,6 +827,7 @@ class QuackleEngine {
             turnNumber = Int(bridge.turnNumber())
 
             if gameMode == .multiplayer {
+                isLocalPlayerTurn = Int(bridge.currentPlayerIndex()) == localPlayerIndex
                 let myIndex = Int32(localPlayerIndex)
                 let opponentIndex: Int32 = localPlayerIndex == 0 ? 1 : 0
                 let rackLetters = bridge.rack(forPlayerIndex: myIndex) as [String]
@@ -795,8 +836,10 @@ class QuackleEngine {
                 }
                 updateAvailableRack()
                 opponentTileCount = (bridge.rack(forPlayerIndex: opponentIndex) as [String]).count
-                refreshMoveHistory()
+                // Don't call refreshMoveHistory() — bridge only has moves since last restore.
+                // History is managed via MultiplayerGameState serialization + appendLatestMoveToHistory().
             } else {
+                isLocalPlayerTurn = true  // pass & play: always local
                 // Pass & Play: rack set by refreshPassAndPlayState after handoff dismiss
                 refreshPassAndPlayState()
                 refreshMoveHistory()
@@ -825,6 +868,7 @@ class QuackleEngine {
 
             currentPlayerName = bridge.currentPlayerName()
             isHumanTurn = bridge.isCurrentPlayerHuman()
+            isLocalPlayerTurn = isHumanTurn  // AI mode: local = human
             isGameOver = bridge.isGameOver()
             tilesInBag = Int(bridge.tilesRemainingInBag())
             opponentTileCount = (bridge.rack(forPlayerIndex: aiIndex) as [String]).count
@@ -1004,6 +1048,32 @@ class QuackleEngine {
     }
 
     func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int) {
+        // Detect newly placed tiles by comparing incoming board with current board
+        var newTiles: [AIAnimTile] = []
+        let isOpponentMove = state.currentPlayerIndex == localPlayerIndex  // it's now our turn = opponent just moved
+        if isOpponentMove && !board.isEmpty {
+            var tileIndex = 0
+            for row in 0..<state.board.count {
+                for col in 0..<state.board[row].count {
+                    if let tile = state.board[row][col] {
+                        let wasEmpty = row < board.count && col < board[row].count && board[row][col].letter == nil
+                        if wasEmpty {
+                            let pts = tile.isBlank ? 0 : (TileModel.tilePoints[tile.letter] ?? 0)
+                            newTiles.append(AIAnimTile(
+                                letter: tile.letter,
+                                isBlank: tile.isBlank,
+                                points: pts,
+                                targetRow: row,
+                                targetCol: col,
+                                rackIndex: tileIndex
+                            ))
+                            tileIndex += 1
+                        }
+                    }
+                }
+            }
+        }
+
         let boardLetters: [[String]] = state.board.map { row in
             row.map { tile in tile?.letter ?? "" }
         }
@@ -1034,8 +1104,33 @@ class QuackleEngine {
         consecutiveScorelessTurns = state.consecutiveScorelessTurns
         tentativePlacements = []
         errorMessage = nil
-        isAnimatingAIMove = false
-        refreshState()
+
+        if !newTiles.isEmpty {
+            // Animate opponent's tiles: show board without the new tiles, then animate them in
+            aiAnimTiles = newTiles
+            aiAnimPhase = 0
+            isAnimatingAIMove = true
+            // Refresh state but we'll overlay the animation
+            refreshState()
+
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    self.aiAnimPhase = 1  // flip face-up
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                withAnimation(.easeInOut(duration: 0.5)) {
+                    self.aiAnimPhase = 2  // fly to board
+                }
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                self.isAnimatingAIMove = false
+                self.aiAnimTiles = []
+                self.aiAnimPhase = 0
+            }
+        } else {
+            isAnimatingAIMove = false
+            refreshState()
+        }
 
         if state.isGameOver {
             isGameOver = true

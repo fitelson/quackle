@@ -68,6 +68,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Move operations
 - (NSArray<QBMoveInfo *> *)kibitzMoves:(int)count;
 - (int)validateMoveString:(NSString *)moveString;
+- (int)scoreMoveString:(NSString *)moveString;
+- (int)scoreMoveStringIgnoringRack:(NSString *)moveString;
 - (BOOL)commitMoveString:(NSString *)moveString;
 - (void)commitPass;
 - (void)commitExchangeWithTiles:(NSString *)tiles;

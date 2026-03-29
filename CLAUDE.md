@@ -37,11 +37,22 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Lexicon: CSW19
 - GameMode enum: .ai (vs computer), .multiplayer (via Game Center), .passAndPlay (two humans, one device)
 - Multiplayer uses GKTurnBasedMatch with programmatic auto-match (GKTurnBasedMatch.find(for:)), no matchmaker UI
-- findOrCreateMatch() cleans up stale matches, resumes active ones, or starts programmatic auto-match
+- findOrCreateMatch() always removes all existing matches then starts fresh auto-match (no resume logic)
 - Only the currentParticipant initializes a new match; the other player waits for first move
 - Opponent display names resolved from match participants when loading state (handles late-join)
 - GameCenterManager conforms to GKLocalPlayerListener for turn event callbacks
+- receivedTurnEventFor only clears isWaitingForOpponent when match data exists (prevents spurious callback race)
+- Both WaitingForOpponentView and GameView poll Game Center every 3s for match updates (fallback for unreliable callbacks)
 - QuackleEngine.onMultiplayerMoveCommitted callback wired in QuackleScrabbleApp to submit turns
+- isLocalPlayerTurn is a stored property updated in refreshState(), not computed (bridge calls aren't tracked by @Observable)
+- Multiplayer move history managed via MultiplayerGameState serialization, not bridge (bridge only has moves since last restore)
+- appendLatestMoveToHistory() reads bridge history post-commit and appends to accumulated moveHistory
+- Opponent moves animate (3-phase flip+fly) in multiplayer via board diff in loadMultiplayerState
+- Hypothetical moves: players can place tiles and see scores while waiting for opponent's turn
+  - Drag allowed when !isLocalPlayerTurn in multiplayer; validation ignores rack check (InvalidTiles 0x0001)
+  - Shows "Score: N" label (orange) instead of Submit button; Clear button available
+  - Bridge method scoreMoveStringIgnoringRack: scores valid board placements regardless of rack ownership
+- Submit button shows score preview: "Submit (N)" for valid tentative moves
 - Pass & Play uses HandoffView overlay between turns to hide the rack during device handoff
 - Bridge has separate methods for AI games (startNewGame/restoreGame) and two-human games (startNewTwoHumanGame/restoreTwoHumanGame)
 - Game state persistence (UserDefaults) only applies to AI mode; multiplayer state lives in GameKit match data
