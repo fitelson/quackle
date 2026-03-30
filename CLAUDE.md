@@ -75,7 +75,13 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - resumeCurrentMatch() refreshes match from Game Center and calls handleMatchFound
 - Turn event callbacks (receivedTurnEventFor, matchEnded) only switch to multiplayer when already in multiplayer mode; otherwise silently update match reference
 - loadActiveMatch() called after Game Center authentication; uses bestPlayableMatch() for consistent dedup
-- Same online game can be open on multiple devices (iPhone + Mac) — Game Center match data is server-side; both see same state
+- Same online game can be open on multiple devices (iPhone + Mac) via iCloud KVS match ID sharing
+- Active match ID stored in NSUbiquitousKeyValueStore (key: "activeMatchID"), syncs across devices within seconds
+- loadActiveMatch and findOrCreateMatch check iCloud KVS first, then fall back to bestPlayableMatch()
+- handleMatchFound writes match ID to KVS; handleMatchEnded/forfeit clears it
+- iCloud KVS entitlement: com.apple.developer.ubiquity-kvstore-identifier in entitlements
+- Poll reloads state whenever match data changes (not just on turn change) — handles same-player cross-device moves
+- One-time match nuke on new build (UserDefaults flag) clears stale matches from testing
 - submitTurn retries up to 3 times with exponential backoff; re-fetches fresh match on retries
 - pendingTurnData persisted to UserDefaults — survives app restart; cleared on match end/forfeit to prevent cross-match corruption
 - forfeitMatch refreshes match from GC before quitting (avoids stale participant state); only clears local state on success
