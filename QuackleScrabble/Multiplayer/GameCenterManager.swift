@@ -128,12 +128,10 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
                 print("[GameCenter] Creating direct-invite match with opponent \(opponentID)...")
-                let opponent: GKPlayer = try await withCheckedThrowingContinuation { cont in
-                    GKPlayer.loadPlayers(forIdentifiers: [opponentID]) { players, error in
-                        if let error { cont.resume(throwing: error) }
-                        else if let player = players?.first { cont.resume(returning: player) }
-                        else { cont.resume(throwing: NSError(domain: "GameCenter", code: -1, userInfo: [NSLocalizedDescriptionKey: "Player not found"])) }
-                    }
+                let friends = try await GKLocalPlayer.local.loadFriends(identifiedBy: [opponentID])
+                guard let opponent = friends.first else {
+                    self.engine?.errorMessage = "Could not find opponent — make sure you're Game Center friends"
+                    return
                 }
                 let request = GKMatchRequest()
                 request.minPlayers = 2
