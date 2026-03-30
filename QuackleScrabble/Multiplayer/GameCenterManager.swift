@@ -494,33 +494,6 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         }
     }
 
-    // MARK: - Game Switching
-
-    var hasActiveMatch: Bool {
-        guard let match = currentMatch else { return false }
-        return match.status == .open || match.status == .matching
-    }
-
-    func resumeCurrentMatch() {
-        guard let match = currentMatch, let engine else { return }
-
-        // Save current AI game before switching
-        if engine.gameMode == .ai {
-            engine.saveGameState()
-        }
-
-        Task {
-            do {
-                let refreshed = try await GKTurnBasedMatch.load(withID: match.matchID)
-                self.currentMatch = refreshed
-                self.handleMatchFound(refreshed)
-            } catch {
-                print("[GameCenter] resumeMatch error: \(error.localizedDescription)")
-                engine.errorMessage = "Failed to resume match: \(error.localizedDescription)"
-            }
-        }
-    }
-
     /// Tracks last-loaded match data size to avoid redundant reloads in poll
     private var lastLoadedDataSize: Int = 0
 
