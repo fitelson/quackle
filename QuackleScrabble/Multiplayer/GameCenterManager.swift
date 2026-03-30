@@ -118,23 +118,29 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         }
                     }
 
-                    // Keep the best match deterministically so both devices pick the same one:
-                    // 1. Prefer match with data (in-progress) over empty
-                    // 2. Tiebreak by smallest matchID (both devices see the same IDs)
+                    // Keep the best match. Priority:
+                    // 1. Has game data (in-progress) beats empty
+                    // 2. Fully paired (both participants) beats unpaired
+                    // 3. Smallest matchID as final tiebreak
                     if let existing = bestMatch {
                         let existingHasData = existing.matchData != nil && !(existing.matchData?.isEmpty ?? true)
+                        let paired = match.participants.allSatisfy { $0.player != nil }
+                        let existingPaired = existing.participants.allSatisfy { $0.player != nil }
+
                         let preferNew: Bool
                         if hasData != existingHasData {
-                            preferNew = hasData  // in-progress beats empty
+                            preferNew = hasData
+                        } else if paired != existingPaired {
+                            preferNew = paired
                         } else {
-                            preferNew = match.matchID < existing.matchID  // deterministic tiebreak
+                            preferNew = match.matchID < existing.matchID
                         }
                         if preferNew {
-                            print("[GameCenter]   removing duplicate \(existing.matchID)")
+                            print("[GameCenter]   removing duplicate \(existing.matchID) (paired=\(existingPaired) data=\(existingHasData))")
                             try? await existing.remove()
                             bestMatch = match
                         } else {
-                            print("[GameCenter]   removing duplicate \(match.matchID)")
+                            print("[GameCenter]   removing duplicate \(match.matchID) (paired=\(paired) data=\(hasData))")
                             try? await match.remove()
                         }
                     } else {
