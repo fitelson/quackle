@@ -160,27 +160,35 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
                 print("[GameCenter] Creating direct-invite match with opponent \(opponentID)...")
-                // Try modern friends API first, fall back to deprecated loadPlayers if needed
-                var opponent: GKPlayer?
+                // Resolve opponent GKPlayer — try friends API, then fall back to loadPlayers
+                let opponent: GKPlayer
+                var resolved: GKPlayer?
                 do {
                     let friends = try await GKLocalPlayer.local.loadFriends(identifiedBy: [opponentID])
-                    opponent = friends.first
+                    resolved = friends.first
                     print("[GameCenter] loadFriends returned \(friends.count) players")
                 } catch {
-                    print("[GameCenter] loadFriends failed: \(error.localizedDescription), trying loadPlayers fallback...")
+                    print("[GameCenter] loadFriends failed: \(error.localizedDescription)")
                 }
-                if opponent == nil {
-                    opponent = try await withCheckedThrowingContinuation { cont in
-                        GKPlayer.loadPlayers(forIdentifiers: [opponentID]) { players, error in
-                            if let error { cont.resume(throwing: error) }
-                            else { cont.resume(returning: players?.first) }
+                if resolved == nil {
+                    print("[GameCenter] Trying loadPlayers fallback...")
+                    do {
+                        resolved = try await withCheckedThrowingContinuation { cont in
+                            GKPlayer.loadPlayers(forIdentifiers: [opponentID]) { players, error in
+                                if let error { cont.resume(throwing: error) }
+                                else { cont.resume(returning: players?.first) }
+                            }
                         }
+                        print("[GameCenter] loadPlayers returned: \(resolved?.displayName ?? "nil")")
+                    } catch {
+                        print("[GameCenter] loadPlayers also failed: \(error.localizedDescription)")
                     }
                 }
-                guard let opponent else {
-                    self.engine?.errorMessage = "Could not find opponent in Game Center"
+                guard let resolved else {
+                    self.engine?.errorMessage = "Could not find opponent — add each other as Game Center friends first"
                     return
                 }
+                opponent = resolved
                 let request = GKMatchRequest()
                 request.minPlayers = 2
                 request.maxPlayers = 2

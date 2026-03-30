@@ -74,6 +74,11 @@ struct ModeSelectionView: View {
                             .foregroundColor(.secondary)
                     }
                 }
+                if let error = engine.errorMessage {
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundColor(.red)
+                }
             }
             .frame(width: 240)
         }
