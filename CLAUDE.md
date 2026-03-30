@@ -48,6 +48,7 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - GameCenterManager conforms to GKLocalPlayerListener for turn event callbacks
 - receivedTurnEventFor only clears isWaitingForOpponent when match data exists (prevents spurious callback race)
 - Both WaitingForOpponentView and GameView poll Game Center every 3s via `.task`-based async loops (auto-cancelled when conditions change)
+- GameView polls whenever in multiplayer mode (not just opponent's turn) — ensures forfeits are detected even when it's your turn
 - Polling uses loadMatches() instead of load(withID:) to avoid stale cached data
 - Poll checks match status (.open) and participant outcomes (.quit) to detect forfeit/end
 - onMultiplayerMoveCommitted callback: initial setup in QuackleScrabbleApp, re-wired by ensureMultiplayerCallback() in handleMatchFound

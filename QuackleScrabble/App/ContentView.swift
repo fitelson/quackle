@@ -191,8 +191,8 @@ struct GameView: View {
                     #endif
             }
         }
-        .task(id: engine.gameMode == .multiplayer && !engine.isLocalPlayerTurn && !engine.isGameOver) {
-            let shouldPoll = engine.gameMode == .multiplayer && !engine.isLocalPlayerTurn && !engine.isGameOver
+        .task(id: engine.gameMode == .multiplayer && !engine.isGameOver) {
+            let shouldPoll = engine.gameMode == .multiplayer && !engine.isGameOver
             guard shouldPoll else { return }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
