@@ -14,15 +14,6 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
     weak var engine: QuackleEngine?
 
-    // The two known players — whichever is local, the other is the opponent
-    private static let knownPlayerIDs = [
-        "A:_efcfe63bc31fd01cf29ea407c71d780a",  // fitelson
-        "A:_ead7114711f507e29d1cf28ac791cfa7"   // Szwarch Of River Twilight
-    ]
-
-    var opponentGamePlayerID: String? {
-        Self.knownPlayerIDs.first { $0 != localPlayerID }
-    }
 
     func authenticate() {
         GKLocalPlayer.local.authenticateHandler = { [weak self] viewController, error in
@@ -146,50 +137,13 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
 
-                // 2. No existing match — create one with direct invite to opponent
-                guard let opponentID = self.opponentGamePlayerID else {
-                    self.engine?.errorMessage = "Unknown opponent — not a registered player"
-                    return
-                }
-                print("[GameCenter] Creating direct-invite match with opponent \(opponentID)...")
-                // Resolve opponent GKPlayer — try friends API, then fall back to loadPlayers
-                let opponent: GKPlayer
-                var resolved: GKPlayer?
-                do {
-                    let friends = try await GKLocalPlayer.local.loadFriends(identifiedBy: [opponentID])
-                    resolved = friends.first
-                    print("[GameCenter] loadFriends returned \(friends.count) players")
-                } catch {
-                    print("[GameCenter] loadFriends failed: \(error.localizedDescription)")
-                }
-                if resolved == nil {
-                    print("[GameCenter] Trying loadPlayers fallback...")
-                    do {
-                        resolved = try await withCheckedThrowingContinuation { cont in
-                            GKPlayer.loadPlayers(forIdentifiers: [opponentID]) { players, error in
-                                if let error { cont.resume(throwing: error) }
-                                else { cont.resume(returning: players?.first) }
-                            }
-                        }
-                        print("[GameCenter] loadPlayers returned: \(resolved?.displayName ?? "nil")")
-                    } catch {
-                        print("[GameCenter] loadPlayers also failed: \(error.localizedDescription)")
-                    }
-                }
-                guard let resolved else {
-                    self.engine?.errorMessage = "Could not find opponent — add each other as Game Center friends first"
-                    return
-                }
-                opponent = resolved
+                // 2. No existing match — auto-match (only two players use this app)
+                print("[GameCenter] Creating auto-match...")
                 let request = GKMatchRequest()
                 request.minPlayers = 2
                 request.maxPlayers = 2
-                request.recipients = [opponent]
-                request.recipientResponseHandler = { player, response in
-                    print("[GameCenter] Recipient \(player.displayName) response: \(response.rawValue)")
-                }
                 let match = try await GKTurnBasedMatch.find(for: request)
-                print("[GameCenter] Direct-invite match created with \(opponent.displayName)!")
+                print("[GameCenter] Auto-match created: \(match.matchID)")
                 self.handleMatchFound(match)
             } catch {
                 print("[GameCenter] Error: \(error.localizedDescription)")
