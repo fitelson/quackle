@@ -185,6 +185,14 @@ struct GameView: View {
                     #endif
             }
         }
+        .alert("Error", isPresented: Binding(
+            get: { engine.errorMessage != nil },
+            set: { if !$0 { engine.errorMessage = nil } }
+        )) {
+            Button("OK") { engine.errorMessage = nil }
+        } message: {
+            Text(engine.errorMessage ?? "")
+        }
         .task(id: engine.gameMode == .multiplayer && !engine.isGameOver) {
             let shouldPoll = engine.gameMode == .multiplayer && !engine.isGameOver
             guard shouldPoll else { return }

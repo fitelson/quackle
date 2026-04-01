@@ -15,7 +15,6 @@ struct QuackleScrabbleApp: App {
                     gameCenterManager.engine = engine
                     gameCenterManager.authenticate()
                     engine.initialize()
-                    setupMultiplayerCallback()
                 }
         }
         #if os(macOS)
@@ -33,24 +32,4 @@ struct QuackleScrabbleApp: App {
         }
     }
 
-    private func setupMultiplayerCallback() {
-        engine.onMultiplayerMoveCommitted = { [weak engine, weak gameCenterManager] in
-            guard let engine, let gameCenterManager else { return }
-            print("[Multiplayer] Move committed, exporting state...")
-            let state = engine.exportMultiplayerState()
-            guard let data = try? JSONEncoder().encode(state) else {
-                print("[Multiplayer] ERROR: Failed to encode state")
-                return
-            }
-            print("[Multiplayer] State encoded: \(data.count) bytes, gameOver=\(engine.isGameOver)")
-            if engine.isGameOver {
-                let localIdx = engine.localPlayerIndex
-                let localScore = state.playerScores[localIdx]
-                let opponentScore = state.playerScores[localIdx == 0 ? 1 : 0]
-                gameCenterManager.endMatch(matchData: data, localWon: localScore > opponentScore)
-            } else {
-                gameCenterManager.submitTurn(matchData: data)
-            }
-        }
-    }
 }

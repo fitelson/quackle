@@ -206,6 +206,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         }
                     } catch {
                         print("[GameCenter]   shared match not loadable: \(error.localizedDescription)")
+                        self.sharedActiveMatchID = nil
                     }
                 }
 
@@ -239,8 +240,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     /// a multiplayer game, so the callback survives game-mode switches.
     private func ensureMultiplayerCallback() {
         guard let engine else { return }
-        guard engine.onMultiplayerMoveCommitted == nil else { return }
-        print("[GameCenter] Re-wiring onMultiplayerMoveCommitted callback")
+        print("[GameCenter] Wiring onMultiplayerMoveCommitted callback")
         engine.onMultiplayerMoveCommitted = { [weak engine, weak self] in
             guard let engine, let gcm = self else { return }
             print("[Multiplayer] Move committed, exporting state...")
@@ -267,7 +267,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
     func handleMatchFound(_ match: GKTurnBasedMatch) {
         currentMatch = match
-        lastLoadedDataSize = 0
+        lastLoadedData = nil
         sharedActiveMatchID = match.matchID
         ensureMultiplayerCallback()
 
@@ -489,8 +489,8 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         }
     }
 
-    /// Tracks last-loaded match data size to avoid redundant reloads in poll
-    private var lastLoadedDataSize: Int = 0
+    /// Tracks last-loaded match data to avoid redundant reloads in poll
+    private var lastLoadedData: Data?
 
     // MARK: - Polling
 
@@ -510,9 +510,8 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
                 self.currentMatch = refreshed
-                let dataSize = refreshed.matchData?.count ?? 0
                 let currentTurn = refreshed.currentParticipant?.player?.gamePlayerID ?? "nil"
-                print("[GameCenter] poll: dataSize=\(dataSize), currentTurn=\(currentTurn), local=\(self.localPlayerID), waiting=\(self.isWaitingForOpponent), status=\(refreshed.status.rawValue)")
+                print("[GameCenter] poll: dataSize=\(refreshed.matchData?.count ?? 0), currentTurn=\(currentTurn), local=\(self.localPlayerID), waiting=\(self.isWaitingForOpponent), status=\(refreshed.status.rawValue)")
 
                 // Check if match ended (opponent forfeited or match otherwise closed)
                 if refreshed.status != .open && refreshed.status != .matching {
@@ -537,7 +536,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 }
 
                 // Skip if data hasn't changed since last load
-                if data.count == self.lastLoadedDataSize && !self.isWaitingForOpponent {
+                if data == self.lastLoadedData && !self.isWaitingForOpponent {
                     return
                 }
 
@@ -551,9 +550,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
                 // Data changed — reload state (covers opponent moves, same-player
                 // moves from another device, and waiting-for-first-move)
-                print("[GameCenter] poll: data changed (\(self.lastLoadedDataSize) → \(data.count)), loading state")
+                print("[GameCenter] poll: data changed (\(self.lastLoadedData?.count ?? 0) → \(data.count)), loading state")
                 self.isWaitingForOpponent = false
-                self.lastLoadedDataSize = data.count
+                self.lastLoadedData = data
                 self.loadMatchState(state, from: refreshed)
             } catch {
                 print("[GameCenter] poll error: \(error.localizedDescription)")

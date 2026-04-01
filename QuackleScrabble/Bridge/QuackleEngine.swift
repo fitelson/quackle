@@ -72,7 +72,6 @@ class QuackleEngine {
     var tilesInBag: Int = 100
     var opponentTileCount: Int = 7
     var turnNumber: Int = 0
-    var lastMoveDescription: String = ""
     var errorMessage: String? = nil
     var isInitialized: Bool = false
     var loadingProgress: Double = 0.0
@@ -204,7 +203,6 @@ class QuackleEngine {
         tentativePlacements = []
         moveHistory = []
         errorMessage = nil
-        lastMoveDescription = ""
         isAnimatingAIMove = false
         aiAnimTiles = []
         aiAnimPhase = 0
@@ -1017,7 +1015,6 @@ class QuackleEngine {
         tentativePlacements = []
         moveHistory = []
         errorMessage = nil
-        lastMoveDescription = ""
         consecutiveScorelessTurns = 0
         isAnimatingAIMove = false
         aiAnimTiles = []

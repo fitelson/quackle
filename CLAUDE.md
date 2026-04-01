@@ -37,9 +37,8 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Bundle ID: `com.bef.quacklescrabble`
 - Lexicon: CSW19
 - GameMode enum: .ai (vs computer), .multiplayer (via Game Center)
-- Multiplayer uses GKTurnBasedMatch with direct-invite matching (GKMatchRequest.recipients), not auto-match pool
-- Two known players hardcoded in GameCenterManager.knownPlayerIDs; opponentGamePlayerID computed from localPlayerID
-- Opponent resolved via loadFriends(identifiedBy:) with loadPlayers(forIdentifiers:) fallback
+- Multiplayer uses GKTurnBasedMatch with auto-match (GKMatchRequest with min/max 2 players)
+- Opponent resolved from match participants by comparing gamePlayerID with localPlayerID
 - NSGKFriendListUsageDescription in Info.plist for friends API access
 - bestPlayableMatch() shared dedup logic: cleans non-playable/finished/duplicate matches; prefers data > paired > smallest matchID
 - findOrCreateMatch() and loadActiveMatch() both use bestPlayableMatch() for consistent match selection
@@ -51,11 +50,11 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - receivedTurnEventFor uses do/catch for JSON decode (not try?) — logs decode failures
 - Both WaitingForOpponentView and GameView poll Game Center every 3s via `.task`-based async loops
 - GameView polls whenever in multiplayer mode (not just opponent's turn) — ensures forfeits detected even on your turn
-- Poll skips redundant reloads via lastLoadedDataSize tracking
+- Poll skips redundant reloads via lastLoadedData byte comparison
 - Poll navigates to mode selection if match disappears from loadMatches() (prevents stuck state)
 - Poll checks match status and participant .quit outcomes to detect forfeit/end
-- onMultiplayerMoveCommitted callback: initial setup in QuackleScrabbleApp, re-wired by ensureMultiplayerCallback() in handleMatchFound
-- ensureMultiplayerCallback() guarantees the callback is set every time a multiplayer game is entered — survives game-mode switches
+- onMultiplayerMoveCommitted callback: sole setup in ensureMultiplayerCallback(), called from handleMatchFound (handles ties correctly)
+- ensureMultiplayerCallback() always overwrites the callback every time a multiplayer game is entered — survives game-mode switches
 - startNewGame() must NOT clear onMultiplayerMoveCommitted
 - isLocalPlayerTurn is a stored property updated in refreshState(), not computed (bridge calls aren't tracked by @Observable)
 - Multiplayer move history managed via MultiplayerGameState serialization, not bridge (bridge only has moves since last restore)
@@ -69,6 +68,7 @@ xcodebuild -project QuackleScrabble.xcodeproj -scheme QuackleScrabble -destinati
 - Bridge has separate methods for AI games (startNewGame/restoreGame) and two-human games (startNewTwoHumanGame/restoreTwoHumanGame)
 - Game state persistence (UserDefaults) only applies to AI mode; multiplayer state lives in GameKit match data
 - ModeSelectionView shown on first launch (no saved game) or when user taps New; shows engine.errorMessage below Play Online button
+- GameView shows engine.errorMessage as an alert (covers multiplayer errors: failed turn, forfeit, match end)
 - "…" Menu next to New button: AI Skill Level (always), Switch to AI Game (in multiplayer), Resume Online Game / Play Online (in AI)
 - Game switching preserves both games: AI saves to UserDefaults, multiplayer lives in Game Center match data
 - switchToAIGame() loads saved AI game or starts new; preserves onMultiplayerMoveCommitted callback

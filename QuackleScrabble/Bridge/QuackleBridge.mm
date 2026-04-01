@@ -629,10 +629,11 @@ static std::string nsToStd(NSString *s) {
         for (int row = 0; row < rows; ++row) {
             NSArray<NSString *> *rowLetters = boardLetters[row];
             NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
+            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
             int cols = (int)rowLetters.count;
             for (int col = 0; col < cols; ++col) {
                 NSString *letter = rowLetters[col];
-                if (letter.length == 0) continue;
+                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
 
                 BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
                 std::string letterStr;
@@ -749,10 +750,11 @@ static std::string nsToStd(NSString *s) {
         for (int row = 0; row < rows; ++row) {
             NSArray<NSString *> *rowLetters = boardLetters[row];
             NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
+            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
             int cols = (int)rowLetters.count;
             for (int col = 0; col < cols; ++col) {
                 NSString *letter = rowLetters[col];
-                if (letter.length == 0) continue;
+                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
 
                 BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
                 std::string letterStr;
