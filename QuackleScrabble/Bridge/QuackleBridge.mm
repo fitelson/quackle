@@ -402,7 +402,7 @@ static std::string nsToStd(NSString *s) {
 
 #pragma mark - AI Play
 
-- (nullable QBMoveInfo *)haveComputerPlay {
+- (nullable QBMoveInfo *)haveComputerPlayWithBingoProbability:(double)bingoProbability {
     if (!_game || !_game->hasPositions()) return nil;
     if (_game->currentPosition().gameOver()) return nil;
 
@@ -413,37 +413,67 @@ static std::string nsToStd(NSString *s) {
 
         // Generate candidate moves
         cp->setPosition(_game->currentPosition());
-        MoveList moves = cp->moves(50);
+        MoveList moves = cp->moves(100);
 
         if (moves.empty()) return nil;
 
-        // Check if NormalPlayer — apply Gaussian selection
-        Move chosenMove = moves.front();
+        static std::mt19937 rng(std::random_device{}());
+
+        // Bingo = a Place move that lays all 7 rack tiles.
+        auto isBingoMove = [](const Move &m) -> bool {
+            if (m.action != Move::Place) return false;
+            int laid = 0;
+            const LetterString &t = m.tiles();
+            for (unsigned int i = 0; i < t.length(); ++i) {
+                if (!Move::isAlreadyOnBoard(t[i])) laid++;
+            }
+            return laid == 7;
+        };
+
+        // Partition candidate-move indices into bingo vs non-bingo pools, then
+        // — when both pools are non-empty — pick which pool to draw from with
+        // probability bingoProbability of choosing the bingo pool.
+        std::vector<size_t> bingoIdx, otherIdx;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            if (isBingoMove(moves[i])) bingoIdx.push_back(i);
+            else otherIdx.push_back(i);
+        }
+
+        std::vector<size_t> pool;
+        if (!bingoIdx.empty() && !otherIdx.empty()) {
+            std::uniform_real_distribution<double> coin(0.0, 1.0);
+            double clamped = std::max(0.0, std::min(1.0, bingoProbability));
+            pool = (coin(rng) < clamped) ? bingoIdx : otherIdx;
+        } else {
+            pool = bingoIdx.empty() ? otherIdx : bingoIdx;
+        }
+
+        // Apply Gaussian selection over the chosen pool (NormalPlayer only).
+        Move chosenMove = moves[pool.front()];
         NormalPlayer *np = dynamic_cast<NormalPlayer *>(cp);
-        if (np && moves.size() > 1) {
-            double bestEquity = moves.front().equity;
-            double medianEquity = moves[moves.size() / 2].equity;
+        if (np && pool.size() > 1) {
+            double bestEquity = moves[pool.front()].equity;
+            double medianEquity = moves[pool[pool.size() / 2]].equity;
             double targetEquity = std::max(bestEquity - np->meanLoss(), medianEquity);
             double sd = np->stdDev();
 
             std::vector<double> weights;
             double sumWeights = 0.0;
-            for (const auto &m : moves) {
-                double diff = m.equity - targetEquity;
+            for (size_t idx : pool) {
+                double diff = moves[idx].equity - targetEquity;
                 double w = std::exp(-0.5 * (diff * diff) / (sd * sd));
                 weights.push_back(w);
                 sumWeights += w;
             }
 
             if (sumWeights > 0.0) {
-                static std::mt19937 rng(std::random_device{}());
                 std::uniform_real_distribution<double> dist(0.0, sumWeights);
                 double r = dist(rng);
                 double cumulative = 0.0;
-                for (size_t i = 0; i < moves.size(); ++i) {
+                for (size_t i = 0; i < pool.size(); ++i) {
                     cumulative += weights[i];
                     if (r <= cumulative) {
-                        chosenMove = moves[i];
+                        chosenMove = moves[pool[i]];
                         break;
                     }
                 }

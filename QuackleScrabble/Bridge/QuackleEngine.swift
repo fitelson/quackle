@@ -711,13 +711,18 @@ class QuackleEngine {
         }
     }
 
+    // Bingo probability is a concave-up function of skillLevel: f(0)=0, f(1)=1,
+    // f(0.5)=0.25. Squaring biases mid-range skill toward avoiding bingos.
+    var bingoProbability: Double { skillLevel * skillLevel }
+
     private func triggerAIIfNeeded() {
         if !isHumanTurn && !isGameOver {
             let bridge = self.bridge
             let queue = self.bridgeQueue
+            let bingoProb = self.bingoProbability
             Task {
                 let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
-                    queue.async { c.resume(returning: bridge.haveComputerPlay()) }
+                    queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoProbability: bingoProb)) }
                 }
                 if let result, result.moveType == 0,
                    !result.placedTiles.isEmpty {

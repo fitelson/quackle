@@ -396,6 +396,10 @@ struct SkillSliderView: View {
                 .font(.headline)
                 .padding(.top)
 
+            Text("Bingo probability: \(Int(round(engine.bingoProbability * 100)))%")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
             HStack {
                 Text("Low")
                     .font(.system(size: 13))
@@ -407,15 +411,23 @@ struct SkillSliderView: View {
             }
             .padding(.horizontal)
 
-            Text("Takes effect on next new game")
+            Text("Also the probability of playing a bingo when one is available")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+
+            Text("Skill takes effect on next new game; bingo probability applies immediately")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
 
             Button("Done") { dismiss() }
                 .padding(.bottom)
         }
         #if os(macOS)
-        .frame(width: 350, height: 180)
+        .frame(width: 350, height: 220)
         #endif
     }
 }

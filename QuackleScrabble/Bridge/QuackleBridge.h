@@ -77,7 +77,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)commitExchangeWithTiles:(NSString *)tiles;
 
 // AI play
-- (nullable QBMoveInfo *)haveComputerPlay;
+// bingoProbability (0..1): when candidate moves include both bingos and non-bingos,
+// the AI plays a bingo with this probability and avoids bingos otherwise.
+- (nullable QBMoveInfo *)haveComputerPlayWithBingoProbability:(double)bingoProbability;
 
 // History
 - (int)historySize;
