@@ -40,36 +40,51 @@ static std::string nsToStd(NSString *s) {
     return c ? std::string(c) : std::string();
 }
 
-// --- AI bingo vocabulary (draw-probability model) ---
-// A bingo's familiarity tracks the draw-probability of its 7 newly-laid tiles — the
-// probability ranking competitive players actually study (common-letter racks like
-// RETINAS learned first; rare-tile racks like QUICKLY last). We score
-// logCount = Σ ln C(bagCount[L], timesUsed[L]) over the laid letters (bingoDrawLogCount),
-// then "know" the bingo iff that logCount sits in the top `bingoKnowledge` fraction of
-// the REAL bingo distribution — i.e. logCount >= the (1 - bingoKnowledge) quantile.
-// This makes the slider track TRUE frequency: 10% ≈ the 10% most-probable bingos.
-// Deterministic (no per-turn randomness) and nested (raising the slider only adds words).
-// Blanks are scored as the letter they represent.
+// --- AI bingo vocabulary (draw-probability model, per word length) ---
+// A bingo always lays 7 tiles, but played THROUGH existing board tiles it can form a word
+// of length 7..15. We score the FULL word's draw-probability
+// logCount = Σ ln C(bagCount[L], timesUsed[L]) over ALL its letters (drawLogCount), then
+// "know" it iff logCount sits in the top `bingoKnowledge` fraction of CSW19 words OF THE
+// SAME LENGTH — i.e. logCount >= the (1 - bingoKnowledge) quantile for that length. So the
+// slider tracks TRUE frequency at every length (an obscure 8-letter word is judged against
+// 8-letter words, not credited just because its 7 drawn tiles are common). Deterministic
+// and nested (raising the slider only adds words). Blanks score as the letter they spell.
 //
-// kBingoQuantile[i] = the (5*i)th percentile of lnDrawCount over the 33,839 drawable
-// 7-letter words in the actual CSW19 lexicon (extracted by walking the bundled
-// data/lexica/csw19.dawg; words needing a blank to draw are excluded). Regenerate with
-// tools/bingo_calib.py if the lexicon changes. Sanity check: REGIONS (ln 12.83) lands at
-// the ~98.4th percentile, matching its real top-2% bingo rank.
-static const double kBingoQuantile[21] = {
-     1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396,
-    10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032,
-    11.9545, 12.3600, 14.3341
+// kBingoQuantile[len][i] = the (5*i)th percentile of lnDrawCount over the CSW19 words of
+// that length (extracted by walking the bundled data/lexica/csw19.dawg; words needing a
+// blank to draw are excluded). Rows 0..6 duplicate row 7 and are never used (bingos ≥ 7).
+// Regenerate with tools/bingo_calib.py if the lexicon changes. Sanity: REGIONS (7, ln
+// 12.83) → ~98th pct; NOTARIES (8) → 100th; TZADDIQS (8) → ~9th.
+static const double kBingoQuantile[16][21] = {
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 0->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 1->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 2->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 3->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 4->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 5->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 6->7
+    {  1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396, 10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032, 11.9545, 12.3600, 14.3341 },  // 7
+    {  2.7081,  8.8410,  9.5342,  9.9396, 10.3451, 10.6328, 10.9205, 11.0746, 11.3259, 11.5491, 11.7314, 11.9321, 12.0723, 12.2910, 12.4245, 12.6784, 12.8300, 13.1177, 13.4361, 13.8108, 15.7204 },  // 8
+    {  3.5835, 10.0292, 10.7869, 11.3102, 11.6444, 11.9545, 12.1732, 12.4245, 12.7122, 12.8483, 13.1177, 13.2538, 13.4725, 13.6593, 13.8416, 14.0828, 14.2527, 14.5347, 14.8449, 15.2687, 17.1067 },  // 9
+    {  4.7875, 11.1560, 11.9729, 12.4245, 12.8300, 13.1540, 13.4586, 13.7238, 13.9470, 14.1701, 14.3704, 14.5936, 14.7917, 14.9923, 15.1971, 15.4203, 15.6334, 15.9210, 16.2087, 16.7012, 18.8114 },  // 10
+    {  5.6630, 12.1552, 13.0531, 13.5823, 14.0115, 14.3524, 14.6218, 14.8813, 15.1326, 15.3513, 15.6026, 15.8257, 16.0264, 16.2312, 16.4499, 16.7012, 16.9243, 17.2244, 17.5305, 18.0230, 20.1977 },  // 11
+    {  6.1862, 13.0895, 13.9650, 14.6218, 15.0456, 15.4203, 15.7387, 16.0081, 16.2620, 16.5189, 16.7320, 16.9607, 17.2120, 17.4127, 17.6483, 17.9052, 18.1771, 18.4648, 18.7806, 19.3222, 21.5840 },  // 12
+    {  5.6630, 14.0340, 14.9766, 15.5928, 16.0752, 16.4499, 16.7683, 17.0785, 17.3482, 17.6175, 17.8406, 18.0875, 18.3290, 18.5826, 18.8215, 19.0867, 19.3403, 19.6587, 20.0334, 20.5724, 22.9703 },  // 13
+    {  9.6519, 14.8633, 15.8033, 16.4499, 16.9427, 17.3786, 17.7536, 18.0593, 18.3594, 18.6471, 18.9168, 19.1579, 19.4119, 19.6587, 19.9201, 20.1977, 20.4854, 20.8319, 21.2194, 21.7426, 23.8866 },  // 14
+    {  8.8410, 15.8257, 16.7195, 17.3969, 17.9258, 18.3313, 18.7161, 19.0526, 19.3403, 19.6099, 19.8819, 20.1512, 20.4209, 20.6804, 20.9497, 21.2374, 21.5558, 21.8923, 22.3180, 22.8288, 24.8674 },  // 15
 };
 
-// lnDrawCount at the p-th percentile (p in [0,1]); linear interp over the 5%-spaced grid.
-static double bingoLnQuantile(double p) {
-    if (p <= 0.0) return kBingoQuantile[0];
-    if (p >= 1.0) return kBingoQuantile[20];
-    double x = p * 20.0;             // position in the 21-point grid
+// lnDrawCount at the p-th percentile for words of the given length; linear interp over the
+// 5%-spaced grid. Length clamped to the 7..15 bingo range.
+static double bingoLnQuantile(int len, double p) {
+    if (len < 7) len = 7; else if (len > 15) len = 15;
+    const double *q = kBingoQuantile[len];
+    if (p <= 0.0) return q[0];
+    if (p >= 1.0) return q[20];
+    double x = p * 20.0;
     int i = (int)x;
-    if (i >= 20) return kBingoQuantile[20];
-    return kBingoQuantile[i] + (x - i) * (kBingoQuantile[i + 1] - kBingoQuantile[i]);
+    if (i >= 20) return q[20];
+    return q[i] + (x - i) * (q[i + 1] - q[i]);
 }
 
 static double lnChoose(int n, int k) {
@@ -81,18 +96,28 @@ static double lnChoose(int n, int k) {
     return r;
 }
 
-// Σ ln C(bagCount, timesUsed) over a move's newly-laid letters (blankness cleared).
-// Higher = more probable to draw = more "common" / familiar.
-static double bingoDrawLogCount(const Move &m) {
+// Σ ln C(bagCount, timesUsed) over a full word's letters (plain). Higher = more probable.
+static double drawLogCount(const LetterString &word) {
     std::map<Letter, int> counts;
-    const LetterString &t = m.tiles();
-    for (unsigned int i = 0; i < t.length(); ++i)
-        if (!Move::isAlreadyOnBoard(t[i]))
-            counts[QUACKLE_ALPHABET_PARAMETERS->clearBlankness(t[i])]++;
+    for (unsigned int i = 0; i < word.length(); ++i) counts[word[i]]++;
     double logCount = 0.0;
     for (const auto &kv : counts)
         logCount += lnChoose(QUACKLE_ALPHABET_PARAMETERS->count(kv.first), kv.second);
     return logCount;
+}
+
+// The full word a Place move forms, as plain letters: laid tiles plus the board tiles it
+// plays through (resolved from the board, blankness cleared).
+static LetterString bingoFullWord(const Move &m, const Board &board) {
+    LetterString word;
+    int r = m.startrow, c = m.startcol;
+    const LetterString &t = m.tiles();
+    for (unsigned int i = 0; i < t.length(); ++i) {
+        Letter L = Move::isAlreadyOnBoard(t[i]) ? board.letter(r, c) : t[i];
+        word += QUACKLE_ALPHABET_PARAMETERS->clearBlankness(L);
+        if (m.horizontal) ++c; else ++r;
+    }
+    return word;
 }
 
 @implementation QBTileInfo
@@ -573,13 +598,16 @@ static double bingoDrawLogCount(const Move &m) {
         // draw-probability (bingoDrawLogCount): common-letter racks are known first,
         // rare-tile racks last. Deterministic per rack and nested in the slider value
         // (raising it only adds words), so the AI's vocabulary is stable across turns.
-        auto knownBingo = [](const Move &m, double knowledge) -> bool {
+        const Board &board = _game->currentPosition().board();
+        auto knownBingo = [&board](const Move &m, double knowledge) -> bool {
             double clamped = std::max(0.0, std::min(1.0, knowledge));
             if (clamped <= 0.0) return false;
             if (clamped >= 1.0) return true;
-            // Known iff in the top `clamped` fraction of bingos by draw-probability:
-            // logCount must clear the (1 - clamped) quantile of the real distribution.
-            return bingoDrawLogCount(m) >= bingoLnQuantile(1.0 - clamped);
+            // Score the FULL word (laid + played-thru letters) against CSW19 words of the
+            // SAME length, so 8+ letter through-plays are judged as the rarer words they
+            // are. Known iff in the top `clamped` fraction at that length.
+            LetterString word = bingoFullWord(m, board);
+            return drawLogCount(word) >= bingoLnQuantile((int)word.length(), 1.0 - clamped);
         };
 
         std::vector<size_t> pool;
