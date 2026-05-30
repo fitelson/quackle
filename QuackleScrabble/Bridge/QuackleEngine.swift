@@ -180,6 +180,13 @@ class QuackleEngine {
         aiTriggerTask = nil
         animationTask?.cancel()
         animationTask = nil
+        // Cancelling animationTask orphans its cleanup, so reset the animation DISPLAY
+        // state here. Otherwise isAnimatingAIMove stays true with stale aiAnimTiles, and
+        // BoardView keeps hiding those squares (isAnimatingTarget) — tiles "disappear"
+        // when you switch games mid-AI-animation and come back.
+        isAnimatingAIMove = false
+        aiAnimTiles = []
+        aiAnimPhase = 0
         // The discarded AI Task's continuation would normally reset this, but it can't
         // run until the current synchronous MainActor call returns — and callers run a
         // withBridgeSync (draining the queue, so _game is stable) right after. Reset now
@@ -1047,10 +1054,11 @@ class QuackleEngine {
 
     func saveGameState() {
         guard isInitialized, !board.isEmpty else { return }
-        // Don't read _game off the bridge queue's back: while the AI is computing/
-        // animating its move, the bridge is mutating _game on bridgeQueue. Skip the
-        // save (it will re-save after the AI move lands / on the next opportunity).
-        guard !aiComputeInFlight, !isAnimatingAIMove else { return }
+        // Don't read _game while haveComputerPlay is mutating it on bridgeQueue. Only
+        // skip during the actual compute (bridgeQueueBusy) — NOT during the post-move
+        // animation phase, when _game is already stable (skipping then would drop the
+        // latest move from the save).
+        guard !bridgeQueueBusy else { return }
 
         let savedBoard: [[SavedTile?]] = board.map { row in
             row.map { square in
