@@ -24,8 +24,9 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - Uses the **CSW19** dictionary
 
 ### Multiplayer
-- Game Center turn-based direct invite to the configured opponent, with iCloud KVS active-match handoff
-- Turn submission with 3x retry and exponential backoff
+- Game Center turn-based auto-match between two configured accounts (allowlist-gated), with iCloud KVS active-match handoff
+- Endgame-adjusted final scores (the unplayed-tiles/deadwood bonus is included in the result and win/loss/tie verdict)
+- Turn submission with 3x retry and exponential backoff; a game-ending move retries too (no lost deciding move)
 - Pending turns persisted by match ID to UserDefaults for cross-restart recovery
 - 3-second polling for opponent moves and forfeit detection
 - Hypothetical moves: place tiles and see scores while waiting for opponent
@@ -39,7 +40,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - AI skill is calibrated so slider midpoint (`0.5`) maps to Quackle `NormalPlayer(meanLoss: 10, stdDev: 6)`.
 - AI bingo vocabulary is a deterministic word-knowledge filter, not a per-turn bingo probability; slider midpoint maps to about 10% raw bingo-word knowledge.
 - Multiplayer state includes turn number, consecutive scoreless turns, game-over state, racks, bag, board, scores, and move history.
-- Multiplayer is intentionally hard-coded to the two configured Game Center `gamePlayerID`s in `FamilyMultiplayer`; other signed-in accounts and unexpected match participants are rejected.
+- Multiplayer is intentionally hard-coded to the two configured Game Center `gamePlayerID`s in `FamilyMultiplayer`; other signed-in accounts and unexpected match participants are rejected. Matchmaking is auto-match (`find(for:)`), which needs no Game Center friendship — the private app's match pool only ever contains the two accounts.
 - Match selection (`bestPlayableMatch`) is non-destructive: it skips finished/unpaired matches but never calls `match.remove()`, because removing an open match orphans the other device's pending Game Center request. Only explicit forfeit/end flows clear the local active match and KVS ID.
 - Simulator validation target used during recent fixes: `platform=iOS Simulator,name=iPhone 17 Pro`.
 
@@ -49,7 +50,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - iOS 17.0+ / macOS 14.0+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 - Apple Developer account (for Game Center multiplayer)
-- Both configured players signed into Game Center and visible via the friends API
+- Both configured accounts signed into Game Center (no friendship required — auto-match pairs them)
 
 ## Build
 
