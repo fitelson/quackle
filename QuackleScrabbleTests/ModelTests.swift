@@ -9,20 +9,33 @@ final class ModelTests: XCTestCase {
     func testAISkillCalibration() {
         let engine = QuackleEngine()
 
+        // skillLevel drives move quality (meanLoss/stdDev) only.
         engine.skillLevel = 0.0
         XCTAssertEqual(engine.skillMeanLoss, 20.0, accuracy: 0.0001)
         XCTAssertEqual(engine.skillStdDev, 8.0, accuracy: 0.0001)
-        XCTAssertEqual(engine.bingoKnowledge, 0.0, accuracy: 0.0001)
 
         engine.skillLevel = 0.5
         XCTAssertEqual(engine.skillMeanLoss, 10.0, accuracy: 0.0001)
         XCTAssertEqual(engine.skillStdDev, 6.0, accuracy: 0.0001)
-        XCTAssertEqual(engine.bingoKnowledge, 0.10, accuracy: 0.0001)
 
         engine.skillLevel = 1.0
         XCTAssertEqual(engine.skillMeanLoss, 2.0, accuracy: 0.0001)
         XCTAssertEqual(engine.skillStdDev, 2.0, accuracy: 0.0001)
-        XCTAssertEqual(engine.bingoKnowledge, 1.0, accuracy: 0.0001)
+    }
+
+    @MainActor
+    func testBingoKnowledgeIndependentOfSkill() {
+        let engine = QuackleEngine()
+
+        // Defaults to 0.10 and is NOT derived from skillLevel anymore.
+        XCTAssertEqual(engine.bingoKnowledge, 0.10, accuracy: 0.0001)
+        engine.skillLevel = 1.0
+        XCTAssertEqual(engine.bingoKnowledge, 0.10, accuracy: 0.0001)
+
+        // Independently settable.
+        engine.bingoKnowledge = 0.5
+        engine.skillLevel = 0.0
+        XCTAssertEqual(engine.bingoKnowledge, 0.5, accuracy: 0.0001)
     }
 
     // MARK: - TileModel

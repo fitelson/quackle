@@ -188,7 +188,7 @@ struct GameView: View {
                 SkillSliderView()
                     .environment(engine)
                     #if os(iOS)
-                    .presentationDetents([.height(320)])
+                    .presentationDetents([.height(460)])
                     #endif
             }
         }
@@ -398,14 +398,11 @@ struct SkillSliderView: View {
     var body: some View {
         @Bindable var engine = engine
 
-        VStack(spacing: 16) {
+        VStack(spacing: 14) {
+            // AI skill (move quality) — applied at the next new game
             Text("AI Skill: \(String(format: "%.1f", engine.skillLevel))")
                 .font(.headline)
                 .padding(.top)
-
-            Text("Bingo vocabulary: \(Int(round(engine.bingoKnowledge * 100)))%")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
 
             HStack {
                 Text("Low")
@@ -418,14 +415,31 @@ struct SkillSliderView: View {
             }
             .padding(.horizontal)
 
-            Text("50% skill is calibrated as intermediate bingo knowledge")
+            Text("Move quality — takes effect on the next new game")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
-            Text("Skill takes effect on next new game;\nbingo vocabulary applies immediately")
+            Divider().padding(.horizontal)
+
+            // Bingo vocabulary — independent of skill, applied immediately
+            Text("Bingo vocabulary: \(Int(round(engine.bingoKnowledge * 100)))%")
+                .font(.headline)
+
+            HStack {
+                Text("Low")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                Slider(value: $engine.bingoKnowledge, in: 0...1, step: 0.05)
+                Text("High")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal)
+
+            Text("Share of bingo words the AI knows — applies immediately")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -436,7 +450,7 @@ struct SkillSliderView: View {
                 .padding(.bottom)
         }
         #if os(macOS)
-        .frame(width: 350, height: 250)
+        .frame(width: 350, height: 360)
         #endif
     }
 }

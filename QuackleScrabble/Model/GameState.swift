@@ -73,6 +73,9 @@ struct SavedGameState: Codable {
     let version: Int
     let humanFirst: Bool
     let skillLevel: Double
+    /// Fraction (0–1) of bingo words the AI knows — independent of skillLevel.
+    /// Defaults to 0.10 for saves from before the two-slider split.
+    let bingoKnowledge: Double
     let board: [[SavedTile?]]
     let players: [SavedPlayer]
     let bag: [String]
@@ -87,12 +90,14 @@ struct SavedGameState: Codable {
     let turnNumber: Int
     let moveHistory: [MoveHistoryEntry]
 
-    init(humanFirst: Bool, skillLevel: Double, board: [[SavedTile?]], players: [SavedPlayer],
+    init(humanFirst: Bool, skillLevel: Double, bingoKnowledge: Double = 0.10,
+         board: [[SavedTile?]], players: [SavedPlayer],
          bag: [String], isGameOver: Bool, isHumanTurn: Bool, scorelessTurns: Int = 0,
          turnNumber: Int = 1, moveHistory: [MoveHistoryEntry], version: Int = 1) {
         self.version = version
         self.humanFirst = humanFirst
         self.skillLevel = skillLevel
+        self.bingoKnowledge = bingoKnowledge
         self.board = board
         self.players = players
         self.bag = bag
@@ -104,7 +109,7 @@ struct SavedGameState: Codable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, humanFirst, skillLevel, board, players, bag, isGameOver, isHumanTurn, scorelessTurns, turnNumber, moveHistory
+        case version, humanFirst, skillLevel, bingoKnowledge, board, players, bag, isGameOver, isHumanTurn, scorelessTurns, turnNumber, moveHistory
     }
 
     // Custom decoder: tolerate older saves that lack newer fields (decodeIfPresent +
@@ -114,6 +119,7 @@ struct SavedGameState: Codable {
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
         humanFirst = try c.decode(Bool.self, forKey: .humanFirst)
         skillLevel = try c.decode(Double.self, forKey: .skillLevel)
+        bingoKnowledge = try c.decodeIfPresent(Double.self, forKey: .bingoKnowledge) ?? 0.10
         board = try c.decode([[SavedTile?]].self, forKey: .board)
         players = try c.decode([SavedPlayer].self, forKey: .players)
         bag = try c.decode([String].self, forKey: .bag)

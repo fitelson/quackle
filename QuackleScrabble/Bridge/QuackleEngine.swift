@@ -841,18 +841,17 @@ class QuackleEngine {
         }
     }
 
-    // Raw percentage of bingo words the AI knows. This is intentionally
-    // non-linear: 50% skill should feel intermediate, not like knowing half
-    // of the entire bingo dictionary.
-    // Clamp before pow: pow(negativeBase, non-integer) is NaN, which would propagate
-    // into the AI gate and trap Int(round(...)) in the skill-slider readout.
-    var bingoKnowledge: Double { pow(min(max(skillLevel, 0.0), 1.0), log(0.10) / log(0.5)) }
+    // Fraction (0–1) of bingo words the AI "knows" — set independently of skillLevel via
+    // its own slider. skillLevel controls move quality (meanLoss/stdDev); this controls
+    // bingo vocabulary, passed per turn to haveComputerPlayWithBingoKnowledge:. Default
+    // 0.10 matches the old skill-0.5 behavior. Persisted in SavedGameState.
+    var bingoKnowledge: Double = 0.10
 
     private func triggerAIIfNeeded() {
         guard !isHumanTurn, !isGameOver, gameMode == .ai else { return }
         let bridge = self.bridge
         let queue = self.bridgeQueue
-        let bingoKnowledge = self.bingoKnowledge
+        let bingoKnowledge = min(max(self.bingoKnowledge, 0.0), 1.0)
         let gen = aiGeneration
         aiComputeInFlight = true
         aiTriggerTask?.cancel()
@@ -1091,6 +1090,7 @@ class QuackleEngine {
         let state = SavedGameState(
             humanFirst: humanFirst,
             skillLevel: skillLevel,
+            bingoKnowledge: bingoKnowledge,
             board: savedBoard,
             players: savedPlayers,
             bag: savedBag,
@@ -1139,6 +1139,7 @@ class QuackleEngine {
 
         // Restore skill level before computing meanLoss/stdDev
         skillLevel = state.skillLevel
+        bingoKnowledge = state.bingoKnowledge
 
         let boardLetters: [[String]] = state.board.map { row in
             row.map { tile in tile?.letter ?? "" }
