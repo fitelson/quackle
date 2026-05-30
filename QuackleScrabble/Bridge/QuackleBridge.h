@@ -88,7 +88,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)commitExchangeWithTiles:(NSString *)tiles;
 
 // AI play
-// bingoKnowledge (0..1): deterministic percentage of bingo words the AI knows.
+// bingoKnowledge (0..1): fraction of bingo vocabulary the AI knows, ordered by
+// draw-probability (common-letter racks known first, rare-tile racks last). Deterministic.
 - (nullable QBMoveInfo *)haveComputerPlayWithBingoKnowledge:(double)bingoKnowledge;
 
 // History

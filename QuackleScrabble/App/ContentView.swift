@@ -439,7 +439,7 @@ struct SkillSliderView: View {
             }
             .padding(.horizontal)
 
-            Text("Share of bingo words the AI knows — applies immediately")
+            Text("Share of bingo words the AI knows (most common first) — applies immediately")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

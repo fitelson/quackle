@@ -7,6 +7,7 @@
 #include <ctime>
 #include <cmath>
 #include <stdexcept>
+#include <map>
 
 #include "datamanager.h"
 #include "game.h"
@@ -37,6 +38,45 @@ static NSString *uvToNS(const UVString &s) {
 static std::string nsToStd(NSString *s) {
     const char *c = s.UTF8String;
     return c ? std::string(c) : std::string();
+}
+
+// --- AI bingo vocabulary (draw-probability model) ---
+// A bingo's "familiarity" tracks the draw-probability of its 7 newly-laid tiles — the
+// standard probability ranking competitive players actually study (common-letter racks
+// like RETINAS are learned first; rare-tile racks like QUICKLY last). We score
+// logCount = Σ ln C(bagCount[L], timesUsed[L]) over the laid letters, map it to a
+// percentile with a normal CDF, and treat the bingo as "known" iff it lands in the top
+// `knowledge` fraction. Deterministic (no per-turn randomness) and nested (raising the
+// slider only adds words). Blanks are scored as the letter they represent.
+//
+// kBingoLogMean/Std are rough calibration constants — we have no lexicon probability
+// distribution at runtime. Reference points (7 single-count letters): ~13.6 = a
+// RETINAS-class common rack, ~6.5 = a rare-letter rack like QUICKLY. Tune to shift how
+// a given slider % feels.
+static const double kBingoLogMean = 10.5;
+static const double kBingoLogStd  = 1.6;
+
+static double lnChoose(int n, int k) {
+    if (k <= 0) return 0.0;
+    if (k > n) return -INFINITY;  // can't draw more of a tile than exist in the bag
+    double r = 0.0;
+    for (int i = 0; i < k; ++i)
+        r += std::log((double)(n - i)) - std::log((double)(i + 1));
+    return r;
+}
+
+// Σ ln C(bagCount, timesUsed) over a move's newly-laid letters (blankness cleared).
+// Higher = more probable to draw = more "common" / familiar.
+static double bingoDrawLogCount(const Move &m) {
+    std::map<Letter, int> counts;
+    const LetterString &t = m.tiles();
+    for (unsigned int i = 0; i < t.length(); ++i)
+        if (!Move::isAlreadyOnBoard(t[i]))
+            counts[QUACKLE_ALPHABET_PARAMETERS->clearBlankness(t[i])]++;
+    double logCount = 0.0;
+    for (const auto &kv : counts)
+        logCount += lnChoose(QUACKLE_ALPHABET_PARAMETERS->count(kv.first), kv.second);
+    return logCount;
 }
 
 @implementation QBTileInfo
@@ -513,38 +553,22 @@ static std::string nsToStd(NSString *s) {
             return laid == 7;
         };
 
-        auto bingoWord = [](const Move &m) -> LetterString {
-            LetterString word = m.wordTiles();
-            if (!word.empty()) return word;
-
-            const LetterString &tiles = m.tiles();
-            for (unsigned int i = 0; i < tiles.length(); ++i) {
-                if (!Move::isAlreadyOnBoard(tiles[i])) {
-                    word += QUACKLE_ALPHABET_PARAMETERS->clearBlankness(tiles[i]);
-                }
-            }
-            return word;
-        };
-
-        auto knownBingoWord = [](const LetterString &word, double knowledge) -> bool {
+        // Hide bingos the AI "doesn't know". Familiarity tracks each bingo's
+        // draw-probability (bingoDrawLogCount): common-letter racks are known first,
+        // rare-tile racks last. Deterministic per rack and nested in the slider value
+        // (raising it only adds words), so the AI's vocabulary is stable across turns.
+        auto knownBingo = [](const Move &m, double knowledge) -> bool {
             double clamped = std::max(0.0, std::min(1.0, knowledge));
             if (clamped <= 0.0) return false;
             if (clamped >= 1.0) return true;
-
-            uint32_t hash = 2166136261u;
-            for (unsigned int i = 0; i < word.length(); ++i) {
-                hash ^= static_cast<uint32_t>(word[i]);
-                hash *= 16777619u;
-            }
-            return (hash % 10000u) < static_cast<uint32_t>(clamped * 10000.0);
+            double z = (bingoDrawLogCount(m) - kBingoLogMean) / kBingoLogStd;
+            double percentile = 0.5 * std::erfc(-z / std::sqrt(2.0));  // Φ(z)
+            return percentile >= (1.0 - clamped);  // known iff in the top `knowledge` fraction
         };
 
-        // Hide unknown bingo words from the AI's vocabulary. The decision is
-        // deterministic per word so the same skill level means the same known
-        // bingo set across turns.
         std::vector<size_t> pool;
         for (size_t i = 0; i < moves.size(); ++i) {
-            if (!isBingoMove(moves[i]) || knownBingoWord(bingoWord(moves[i]), bingoKnowledge)) {
+            if (!isBingoMove(moves[i]) || knownBingo(moves[i], bingoKnowledge)) {
                 pool.push_back(i);
             }
         }
