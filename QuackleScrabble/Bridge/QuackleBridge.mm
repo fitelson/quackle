@@ -41,20 +41,36 @@ static std::string nsToStd(NSString *s) {
 }
 
 // --- AI bingo vocabulary (draw-probability model) ---
-// A bingo's "familiarity" tracks the draw-probability of its 7 newly-laid tiles — the
-// standard probability ranking competitive players actually study (common-letter racks
-// like RETINAS are learned first; rare-tile racks like QUICKLY last). We score
-// logCount = Σ ln C(bagCount[L], timesUsed[L]) over the laid letters, map it to a
-// percentile with a normal CDF, and treat the bingo as "known" iff it lands in the top
-// `knowledge` fraction. Deterministic (no per-turn randomness) and nested (raising the
-// slider only adds words). Blanks are scored as the letter they represent.
+// A bingo's familiarity tracks the draw-probability of its 7 newly-laid tiles — the
+// probability ranking competitive players actually study (common-letter racks like
+// RETINAS learned first; rare-tile racks like QUICKLY last). We score
+// logCount = Σ ln C(bagCount[L], timesUsed[L]) over the laid letters (bingoDrawLogCount),
+// then "know" the bingo iff that logCount sits in the top `bingoKnowledge` fraction of
+// the REAL bingo distribution — i.e. logCount >= the (1 - bingoKnowledge) quantile.
+// This makes the slider track TRUE frequency: 10% ≈ the 10% most-probable bingos.
+// Deterministic (no per-turn randomness) and nested (raising the slider only adds words).
+// Blanks are scored as the letter they represent.
 //
-// kBingoLogMean/Std are rough calibration constants — we have no lexicon probability
-// distribution at runtime. Reference points (7 single-count letters): ~13.6 = a
-// RETINAS-class common rack, ~6.5 = a rare-letter rack like QUICKLY. Tune to shift how
-// a given slider % feels.
-static const double kBingoLogMean = 10.5;
-static const double kBingoLogStd  = 1.6;
+// kBingoQuantile[i] = the (5*i)th percentile of lnDrawCount over the 20,362 drawable
+// 7-letter words in /usr/share/dict/words (a proxy for CSW19 — the percentile shapes are
+// close; words needing a blank to draw are excluded). Regenerate with tools/bingo_calib.py
+// if the lexicon changes. Sanity check: REGIONS (ln 12.83) lands at ~the 98th percentile
+// here, matching its real top-2% bingo rank.
+static const double kBingoQuantile[21] = {
+     3.1781,  7.6089,  8.2657,  8.7765,  9.1129,  9.3643,  9.6238,  9.8526,  9.9704,
+    10.2273, 10.3451, 10.6328, 10.7506, 10.9512, 11.0382, 11.3259, 11.4437, 11.7314,
+    12.0191, 12.4245, 14.3341
+};
+
+// lnDrawCount at the p-th percentile (p in [0,1]); linear interp over the 5%-spaced grid.
+static double bingoLnQuantile(double p) {
+    if (p <= 0.0) return kBingoQuantile[0];
+    if (p >= 1.0) return kBingoQuantile[20];
+    double x = p * 20.0;             // position in the 21-point grid
+    int i = (int)x;
+    if (i >= 20) return kBingoQuantile[20];
+    return kBingoQuantile[i] + (x - i) * (kBingoQuantile[i + 1] - kBingoQuantile[i]);
+}
 
 static double lnChoose(int n, int k) {
     if (k <= 0) return 0.0;
@@ -561,9 +577,9 @@ static double bingoDrawLogCount(const Move &m) {
             double clamped = std::max(0.0, std::min(1.0, knowledge));
             if (clamped <= 0.0) return false;
             if (clamped >= 1.0) return true;
-            double z = (bingoDrawLogCount(m) - kBingoLogMean) / kBingoLogStd;
-            double percentile = 0.5 * std::erfc(-z / std::sqrt(2.0));  // Φ(z)
-            return percentile >= (1.0 - clamped);  // known iff in the top `knowledge` fraction
+            // Known iff in the top `clamped` fraction of bingos by draw-probability:
+            // logCount must clear the (1 - clamped) quantile of the real distribution.
+            return bingoDrawLogCount(m) >= bingoLnQuantile(1.0 - clamped);
         };
 
         std::vector<size_t> pool;
