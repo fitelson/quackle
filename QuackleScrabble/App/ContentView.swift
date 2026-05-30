@@ -422,19 +422,21 @@ struct SkillSliderView: View {
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
             Text("Skill takes effect on next new game; bingo vocabulary applies immediately")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
             Button("Done") { dismiss() }
                 .padding(.bottom)
         }
         #if os(macOS)
-        .frame(width: 350, height: 220)
+        .frame(width: 350, height: 250)
         #endif
     }
 }
