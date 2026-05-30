@@ -45,7 +45,7 @@ struct MoveInputView: View {
                             engine.switchToAIGame()
                         }
                     }
-                    if engine.gameMode != .multiplayer && gameCenterManager.isAuthenticated {
+                    if engine.gameMode != .multiplayer && gameCenterManager.canUseMultiplayer {
                         Button("Play Online") {
                             if engine.gameMode == .ai {
                                 engine.saveGameState()

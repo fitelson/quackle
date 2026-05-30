@@ -48,8 +48,14 @@ struct BoardView: View {
 
                             ForEach(0..<board[row].count, id: \.self) { col in
                                 let tentative = engine.tentativeLetterAt(row: row, col: col)
+                                let isAnimatingTarget = engine.isAnimatingAIMove && engine.aiAnimTiles.contains {
+                                    $0.targetRow == row && $0.targetCol == col
+                                }
+                                let displaySquare = isAnimatingTarget
+                                    ? SquareModel(letter: nil, isBlank: false, bonus: board[row][col].bonus)
+                                    : board[row][col]
                                 let square = SquareView(
-                                    square: board[row][col],
+                                    square: displaySquare,
                                     tentative: tentative,
                                     isValid: engine.isTentativeMoveValid,
                                     hasTentativeTiles: !engine.tentativePlacements.isEmpty,

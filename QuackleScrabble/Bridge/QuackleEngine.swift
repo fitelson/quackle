@@ -114,8 +114,11 @@ class QuackleEngine {
     var localPlayerIndex: Int = 0
     var multiplayerPlayer1ID: String = ""
     var multiplayerPlayer2ID: String = ""
+    var multiplayerMatchID: String = ""
     var consecutiveScorelessTurns: Int = 0
     var onMultiplayerMoveCommitted: (() -> Void)?
+    /// Win/loss/tie message shown when a multiplayer game ends (nil otherwise).
+    var gameResultMessage: String?
 
 
     var isLocalPlayerTurn: Bool = true
@@ -130,6 +133,14 @@ class QuackleEngine {
 
     private let bridge: QuackleBridge = QuackleBridge.shared()
     private let bridgeQueue = DispatchQueue(label: "com.bef.quackle.bridge")
+
+    private var canCommitCurrentTurn: Bool {
+        guard !isGameOver else { return false }
+        switch gameMode {
+        case .ai: return isHumanTurn
+        case .multiplayer: return isLocalPlayerTurn
+        }
+    }
 
     func initialize() {
         guard let dataPath = Bundle.main.path(forResource: "data", ofType: nil) else {
@@ -189,8 +200,13 @@ class QuackleEngine {
             }
             self.loadingProgress = 1.0
             self.isInitialized = true
-            if !self.loadSavedGame() {
-                self.showModeSelection = true
+            // If a multiplayer game was already restored during init (e.g. an
+            // inbound turn event that waited on isInitialized), don't clobber it
+            // with a saved AI game / mode selection.
+            if self.gameMode != .multiplayer {
+                if !self.loadSavedGame() {
+                    self.showModeSelection = true
+                }
             }
         }
     }
@@ -203,6 +219,7 @@ class QuackleEngine {
         tentativePlacements = []
         moveHistory = []
         errorMessage = nil
+        gameResultMessage = nil  // never show a stale multiplayer verdict on an AI game
         isAnimatingAIMove = false
         aiAnimTiles = []
         aiAnimPhase = 0
@@ -424,6 +441,10 @@ class QuackleEngine {
     func commitTentativeMove() {
         guard !tentativePlacements.isEmpty else { return }
         errorMessage = nil
+        guard canCommitCurrentTurn else {
+            errorMessage = "It is not your turn"
+            return
+        }
 
         guard let moveString = buildMoveString() else {
             errorMessage = "Invalid tile placement — tiles must be in a line"
@@ -570,8 +591,16 @@ class QuackleEngine {
     // Low (0): δ=20, σ=8 — loses ~20 points/turn, very erratic
     // Medium (0.5): δ=10, σ=6 — loses ~10 points/turn
     // High (1): δ=2, σ=2 — near-perfect play
-    var skillMeanLoss: Double { 20.0 - (skillLevel * 18.0) }  // 20 -> 2
-    var skillStdDev: Double { 8.0 - (skillLevel * 6.0) }      // 8 -> 2
+    var skillMeanLoss: Double { skillCurve(low: 20.0, medium: 10.0, high: 2.0) }
+    var skillStdDev: Double { skillCurve(low: 8.0, medium: 6.0, high: 2.0) }
+
+    private func skillCurve(low: Double, medium: Double, high: Double) -> Double {
+        let clamped = min(max(skillLevel, 0.0), 1.0)
+        if clamped <= 0.5 {
+            return low + ((medium - low) * (clamped / 0.5))
+        }
+        return medium + ((high - medium) * ((clamped - 0.5) / 0.5))
+    }
 
     var skillLabel: String {
         if skillLevel < 0.25 { return "Low" }
@@ -598,16 +627,36 @@ class QuackleEngine {
     /// and append any new entries to the accumulated moveHistory.
     private func appendLatestMoveToHistory() {
         let entries = bridge.moveHistory()
+        let numPlayers = Int(bridge.numberOfPlayers())
         for entry in entries {
+            let idx = Int(entry.playerIndex)
+            // Attribute the running total by player INDEX (name can collide). Fall
+            // back to name only for legacy entries lacking a valid index.
+            var totalScore = Int(entry.totalScore)
+            if idx >= 0 && idx < numPlayers {
+                totalScore = Int(bridge.score(forPlayerIndex: Int32(idx)))
+            } else {
+                for i in 0..<numPlayers where bridge.name(forPlayerIndex: Int32(i)) == entry.playerName {
+                    totalScore = Int(bridge.score(forPlayerIndex: Int32(i)))
+                    break
+                }
+            }
             let newEntry = MoveHistoryEntry(
                 turn: Int(entry.turn),
+                playerIndex: idx,
                 playerName: entry.playerName,
                 moveDescription: entry.moveDescription,
                 score: Int(entry.score),
-                totalScore: Int(entry.totalScore)
+                totalScore: totalScore
             )
-            // Only append if not already present (match on turn + playerName)
-            if !moveHistory.contains(where: { $0.turn == newEntry.turn && $0.playerName == newEntry.playerName }) {
+            // Dedup on (turn, playerIndex) when both indices are known; otherwise
+            // fall back to (turn, playerName) for legacy entries.
+            let exists = moveHistory.contains { e in
+                guard e.turn == newEntry.turn else { return false }
+                if e.playerIndex >= 0 && idx >= 0 { return e.playerIndex == idx }
+                return e.playerName == newEntry.playerName
+            }
+            if !exists {
                 moveHistory.append(newEntry)
             }
         }
@@ -686,6 +735,10 @@ class QuackleEngine {
     }
 
     func pass() {
+        guard canCommitCurrentTurn else {
+            errorMessage = "It is not your turn"
+            return
+        }
         tentativePlacements = []
         consecutiveScorelessTurns += 1
         bridge.commitPass()
@@ -699,6 +752,10 @@ class QuackleEngine {
     }
 
     func exchangeTiles(_ tiles: String) {
+        guard canCommitCurrentTurn else {
+            errorMessage = "It is not your turn"
+            return
+        }
         tentativePlacements = []
         consecutiveScorelessTurns += 1
         bridge.commitExchange(withTiles: tiles)
@@ -711,18 +768,19 @@ class QuackleEngine {
         }
     }
 
-    // Bingo probability is a concave-up function of skillLevel: f(0)=0, f(1)=1,
-    // f(0.5)=0.25. Squaring biases mid-range skill toward avoiding bingos.
-    var bingoProbability: Double { skillLevel * skillLevel }
+    // Raw percentage of bingo words the AI knows. This is intentionally
+    // non-linear: 50% skill should feel intermediate, not like knowing half
+    // of the entire bingo dictionary.
+    var bingoKnowledge: Double { pow(skillLevel, log(0.10) / log(0.5)) }
 
     private func triggerAIIfNeeded() {
         if !isHumanTurn && !isGameOver {
             let bridge = self.bridge
             let queue = self.bridgeQueue
-            let bingoProb = self.bingoProbability
+            let bingoKnowledge = self.bingoKnowledge
             Task {
                 let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
-                    queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoProbability: bingoProb)) }
+                    queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
                 }
                 if let result, result.moveType == 0,
                    !result.placedTiles.isEmpty {
@@ -941,6 +999,7 @@ class QuackleEngine {
 
         gameMode = .ai
         showModeSelection = false
+        gameResultMessage = nil  // never show a stale multiplayer verdict on an AI game
 
         // Restore skill level before computing meanLoss/stdDev
         skillLevel = state.skillLevel
@@ -1009,17 +1068,20 @@ class QuackleEngine {
         player2Name: String,
         localPlayerIndex: Int,
         player1GameCenterID: String,
-        player2GameCenterID: String
+        player2GameCenterID: String,
+        matchID: String
     ) {
         bridge.startNewTwoHumanGame(withPlayer1: player1Name, player2: player2Name)
         gameMode = .multiplayer
         showModeSelection = false
         self.localPlayerIndex = localPlayerIndex
+        multiplayerMatchID = matchID
         multiplayerPlayer1ID = player1GameCenterID
         multiplayerPlayer2ID = player2GameCenterID
         tentativePlacements = []
         moveHistory = []
         errorMessage = nil
+        gameResultMessage = nil
         consecutiveScorelessTurns = 0
         isAnimatingAIMove = false
         aiAnimTiles = []
@@ -1027,11 +1089,12 @@ class QuackleEngine {
         refreshState()
     }
 
-    func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int) {
+    func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int, matchID: String) {
         // Detect newly placed tiles by comparing incoming board with current board
         var newTiles: [AIAnimTile] = []
         let isOpponentMove = state.currentPlayerIndex == localPlayerIndex  // it's now our turn = opponent just moved
-        if isOpponentMove && !board.isEmpty {
+        let isSameVisibleMatch = gameMode == .multiplayer && multiplayerMatchID == matchID && !board.isEmpty
+        if isOpponentMove && isSameVisibleMatch {
             var tileIndex = 0
             for row in 0..<state.board.count {
                 for col in 0..<state.board[row].count {
@@ -1072,18 +1135,23 @@ class QuackleEngine {
             playerScores: scores,
             playerRacks: racks,
             bagTiles: state.bag,
-            currentPlayerIndex: Int32(state.currentPlayerIndex)
+            currentPlayerIndex: Int32(state.currentPlayerIndex),
+            currentTurnNumber: Int32(state.turnNumber),
+            scorelessTurns: Int32(state.consecutiveScorelessTurns),
+            gameOver: state.isGameOver
         )
 
         gameMode = .multiplayer
         showModeSelection = false
         self.localPlayerIndex = localPlayerIndex
+        multiplayerMatchID = matchID
         multiplayerPlayer1ID = state.player1GameCenterID
         multiplayerPlayer2ID = state.player2GameCenterID
         moveHistory = state.moveHistory
         consecutiveScorelessTurns = state.consecutiveScorelessTurns
         tentativePlacements = []
         errorMessage = nil
+        if !state.isGameOver { gameResultMessage = nil }
 
         if !newTiles.isEmpty {
             // Animate opponent's tiles: show board without the new tiles, then animate them in
@@ -1150,6 +1218,7 @@ class QuackleEngine {
             playerRacks: racks,
             bag: bag,
             currentPlayerIndex: currentIdx,
+            turnNumber: Int(bridge.turnNumber()),
             moveHistory: moveHistory,
             isGameOver: isGameOver,
             consecutiveScorelessTurns: consecutiveScorelessTurns

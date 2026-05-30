@@ -68,7 +68,7 @@ struct GameView: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.orange)
                     .controlSize(.large)
-                    .disabled(engine.exchangeSelectedIds.isEmpty)
+                    .disabled(engine.exchangeSelectedIds.isEmpty || !engine.isLocalPlayerTurn || engine.isGameOver)
 
                     Button("Cancel") {
                         engine.cancelExchange()
@@ -109,9 +109,16 @@ struct GameView: View {
             }
 
             if engine.isGameOver {
-                Text("GAME OVER")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.red)
+                VStack(spacing: 2) {
+                    Text("GAME OVER")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.red)
+                    if let result = engine.gameResultMessage {
+                        Text(result)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+                }
             }
 
             RackView()
@@ -396,7 +403,7 @@ struct SkillSliderView: View {
                 .font(.headline)
                 .padding(.top)
 
-            Text("Bingo probability: \(Int(round(engine.bingoProbability * 100)))%")
+            Text("Bingo vocabulary: \(Int(round(engine.bingoKnowledge * 100)))%")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
 
@@ -411,13 +418,13 @@ struct SkillSliderView: View {
             }
             .padding(.horizontal)
 
-            Text("Also the probability of playing a bingo when one is available")
+            Text("50% skill is calibrated as intermediate bingo knowledge")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Text("Skill takes effect on next new game; bingo probability applies immediately")
+            Text("Skill takes effect on next new game; bingo vocabulary applies immediately")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -472,4 +479,3 @@ struct WaitingForOpponentView: View {
         }
     }
 }
-

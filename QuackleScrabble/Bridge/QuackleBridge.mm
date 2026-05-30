@@ -402,7 +402,7 @@ static std::string nsToStd(NSString *s) {
 
 #pragma mark - AI Play
 
-- (nullable QBMoveInfo *)haveComputerPlayWithBingoProbability:(double)bingoProbability {
+- (nullable QBMoveInfo *)haveComputerPlayWithBingoKnowledge:(double)bingoKnowledge {
     if (!_game || !_game->hasPositions()) return nil;
     if (_game->currentPosition().gameOver()) return nil;
 
@@ -430,22 +430,45 @@ static std::string nsToStd(NSString *s) {
             return laid == 7;
         };
 
-        // Partition candidate-move indices into bingo vs non-bingo pools, then
-        // — when both pools are non-empty — pick which pool to draw from with
-        // probability bingoProbability of choosing the bingo pool.
-        std::vector<size_t> bingoIdx, otherIdx;
-        for (size_t i = 0; i < moves.size(); ++i) {
-            if (isBingoMove(moves[i])) bingoIdx.push_back(i);
-            else otherIdx.push_back(i);
-        }
+        auto bingoWord = [](const Move &m) -> LetterString {
+            LetterString word = m.wordTiles();
+            if (!word.empty()) return word;
 
+            const LetterString &tiles = m.tiles();
+            for (unsigned int i = 0; i < tiles.length(); ++i) {
+                if (!Move::isAlreadyOnBoard(tiles[i])) {
+                    word += QUACKLE_ALPHABET_PARAMETERS->clearBlankness(tiles[i]);
+                }
+            }
+            return word;
+        };
+
+        auto knownBingoWord = [](const LetterString &word, double knowledge) -> bool {
+            double clamped = std::max(0.0, std::min(1.0, knowledge));
+            if (clamped <= 0.0) return false;
+            if (clamped >= 1.0) return true;
+
+            uint32_t hash = 2166136261u;
+            for (unsigned int i = 0; i < word.length(); ++i) {
+                hash ^= static_cast<uint32_t>(word[i]);
+                hash *= 16777619u;
+            }
+            return (hash % 10000u) < static_cast<uint32_t>(clamped * 10000.0);
+        };
+
+        // Hide unknown bingo words from the AI's vocabulary. The decision is
+        // deterministic per word so the same skill level means the same known
+        // bingo set across turns.
         std::vector<size_t> pool;
-        if (!bingoIdx.empty() && !otherIdx.empty()) {
-            std::uniform_real_distribution<double> coin(0.0, 1.0);
-            double clamped = std::max(0.0, std::min(1.0, bingoProbability));
-            pool = (coin(rng) < clamped) ? bingoIdx : otherIdx;
-        } else {
-            pool = bingoIdx.empty() ? otherIdx : bingoIdx;
+        for (size_t i = 0; i < moves.size(); ++i) {
+            if (!isBingoMove(moves[i]) || knownBingoWord(bingoWord(moves[i]), bingoKnowledge)) {
+                pool.push_back(i);
+            }
+        }
+        if (pool.empty()) {
+            for (size_t i = 0; i < moves.size(); ++i) {
+                pool.push_back(i);
+            }
         }
 
         // Apply Gaussian selection over the chosen pool (NormalPlayer only).
@@ -553,6 +576,7 @@ static std::string nsToStd(NSString *s) {
 
                 QBHistoryEntry *entry = [[QBHistoryEntry alloc] init];
                 entry.turn = pos.turnNumber();
+                entry.playerIndex = player.id();
                 entry.playerName = uvToNS(player.name());
                 entry.moveDescription = uvToNS(move.toString());
                 entry.score = moveScore;
@@ -561,9 +585,10 @@ static std::string nsToStd(NSString *s) {
             }
         }
 
-        // Sort by turn number
+        // Sort by turn number, then by player index (stable, name-collision-proof)
         [result sortUsingComparator:^NSComparisonResult(QBHistoryEntry *a, QBHistoryEntry *b) {
             if (a.turn != b.turn) return a.turn < b.turn ? NSOrderedAscending : NSOrderedDescending;
+            if (a.playerIndex != b.playerIndex) return a.playerIndex < b.playerIndex ? NSOrderedAscending : NSOrderedDescending;
             return [a.playerName compare:b.playerName];
         }];
 
@@ -754,7 +779,10 @@ static std::string nsToStd(NSString *s) {
                           playerScores:(NSArray<NSNumber *> *)scores
                            playerRacks:(NSArray<NSArray<NSString *> *> *)racks
                               bagTiles:(NSArray<NSString *> *)bagTileLetters
-                    currentPlayerIndex:(int)currentIdx {
+                    currentPlayerIndex:(int)currentIdx
+                      currentTurnNumber:(int)turnNumber
+                         scorelessTurns:(int)scorelessTurns
+                               gameOver:(BOOL)gameOver {
     try {
         delete _game;
         _game = new Game;
@@ -830,9 +858,13 @@ static std::string nsToStd(NSString *s) {
 
         // Set current player
         _game->currentPosition().setCurrentPlayer(currentIdx);
+        _game->currentPosition().setTurnNumber(turnNumber);
+        _game->currentPosition().setScorelessTurnsInARow(scorelessTurns);
+        _game->currentPosition().setGameOver(gameOver);
 
-        NSLog(@"QuackleBridge: Two-human game restored — %@ vs %@, bag=%d tiles, player %d to play",
-              name1, name2, (int)_game->currentPosition().bag().size(), currentIdx);
+        NSLog(@"QuackleBridge: Two-human game restored — %@ vs %@, bag=%d tiles, player %d turn %d, scoreless=%d, gameOver=%@",
+              name1, name2, (int)_game->currentPosition().bag().size(), currentIdx,
+              turnNumber, scorelessTurns, gameOver ? @"YES" : @"NO");
     } catch (const std::exception &e) {
         NSLog(@"QuackleBridge: C++ exception in restoreTwoHumanGame: %s", e.what());
     } catch (...) {

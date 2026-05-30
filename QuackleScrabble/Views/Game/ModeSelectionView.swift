@@ -44,9 +44,9 @@ struct ModeSelectionView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(!gameCenterManager.isAuthenticated || gameCenterManager.isFinding)
+                .disabled(!gameCenterManager.canUseMultiplayer || gameCenterManager.isFinding)
 
-                if !gameCenterManager.isAuthenticated {
+                if !gameCenterManager.isAuthenticated || !gameCenterManager.canUseMultiplayer {
                     if let error = gameCenterManager.authError {
                         Text("Game Center: \(error)")
                             .font(.system(size: 12))

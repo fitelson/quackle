@@ -386,6 +386,7 @@ public:
 	// Turn numbers in games start from 1.
 	// A turn number of zero indicates a position that is pregame.
 	int turnNumber() const;
+	void setTurnNumber(int turnNumber);
 
 	// nestedness of this position in a recursive calculation
 	void setNestedness(unsigned int nestedness);
@@ -397,6 +398,8 @@ public:
 
 	// number of plays in a row that have been scoreless
 	int scorelessTurnsInARow() const;
+	void setScorelessTurnsInARow(int scorelessTurnsInARow);
+	void setGameOver(bool gameOver);
 
 	HistoryLocation location() const;
 
@@ -421,8 +424,6 @@ protected:
 	Move m_moveMade;
 	Move m_committedMove;
 
-	// I feel safer with this not being public
-	void setTurnNumber(int turnNumber);
 	int m_turnNumber;
 	unsigned int m_nestedness;
 	int m_scorelessTurnsInARow;
@@ -582,6 +583,16 @@ inline void GamePosition::incrementNestedness()
 inline int GamePosition::scorelessTurnsInARow() const
 {
 	return m_scorelessTurnsInARow;
+}
+
+inline void GamePosition::setScorelessTurnsInARow(int scorelessTurnsInARow)
+{
+	m_scorelessTurnsInARow = scorelessTurnsInARow;
+}
+
+inline void GamePosition::setGameOver(bool gameOver)
+{
+	m_gameOver = gameOver;
 }
 
 inline HistoryLocation GamePosition::location() const

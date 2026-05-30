@@ -20,6 +20,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface QBHistoryEntry : NSObject
 @property (nonatomic) int turn;
+@property (nonatomic) int playerIndex;
 @property (nonatomic, copy) NSString *playerName;
 @property (nonatomic, copy) NSString *moveDescription;
 @property (nonatomic) int score;
@@ -77,9 +78,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)commitExchangeWithTiles:(NSString *)tiles;
 
 // AI play
-// bingoProbability (0..1): when candidate moves include both bingos and non-bingos,
-// the AI plays a bingo with this probability and avoids bingos otherwise.
-- (nullable QBMoveInfo *)haveComputerPlayWithBingoProbability:(double)bingoProbability;
+// bingoKnowledge (0..1): deterministic percentage of bingo words the AI knows.
+- (nullable QBMoveInfo *)haveComputerPlayWithBingoKnowledge:(double)bingoKnowledge;
 
 // History
 - (int)historySize;
@@ -111,9 +111,12 @@ NS_ASSUME_NONNULL_BEGIN
                           boardLetters:(NSArray<NSArray<NSString *> *> *)boardLetters
                            boardBlanks:(NSArray<NSArray<NSNumber *> *> *)boardBlanks
                           playerScores:(NSArray<NSNumber *> *)scores
-                           playerRacks:(NSArray<NSArray<NSString *> *> *)racks
+                          playerRacks:(NSArray<NSArray<NSString *> *> *)racks
                               bagTiles:(NSArray<NSString *> *)bag
-                    currentPlayerIndex:(int)currentIdx;
+                    currentPlayerIndex:(int)currentIdx
+                      currentTurnNumber:(int)turnNumber
+                         scorelessTurns:(int)scorelessTurns
+                               gameOver:(BOOL)gameOver;
 
 @end
 

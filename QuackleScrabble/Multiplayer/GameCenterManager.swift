@@ -1,6 +1,84 @@
 import Foundation
 import GameKit
 import Observation
+#if os(iOS)
+import UIKit
+#endif
+
+/// The local player's outcome for a terminal (game-ending) submission.
+private enum TerminalOutcome: Int, Codable {
+    case won, lost, tied
+}
+
+private struct PendingTurn: Codable {
+    let matchID: String
+    let data: Data
+    /// nil = a normal mid-game turn (endTurn). Non-nil = a terminal end-match
+    /// submission (endMatchInTurn) carrying the local player's outcome, so a
+    /// transient failure can be retried instead of losing the game-deciding move.
+    var terminal: TerminalOutcome?
+
+    init(matchID: String, data: Data, terminal: TerminalOutcome? = nil) {
+        self.matchID = matchID
+        self.data = data
+        self.terminal = terminal
+    }
+
+    enum CodingKeys: String, CodingKey { case matchID, data, terminal }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        matchID = try c.decode(String.self, forKey: .matchID)
+        data = try c.decode(Data.self, forKey: .data)
+        terminal = try c.decodeIfPresent(TerminalOutcome.self, forKey: .terminal)
+    }
+}
+
+private enum FamilyMultiplayer {
+    static let fitelsonID = "A:_efcfe63bc31fd01cf29ea407c71d780a"
+    static let szwarchID = "A:_ead7114711f507e29d1cf28ac791cfa7"
+    static let allowedIDs: Set<String> = [fitelsonID, szwarchID]
+
+    static func isAllowed(_ playerID: String) -> Bool {
+        allowedIDs.contains(playerID)
+    }
+
+    static func opponentID(for localPlayerID: String) -> String? {
+        switch localPlayerID {
+        case fitelsonID: return szwarchID
+        case szwarchID: return fitelsonID
+        default: return nil
+        }
+    }
+
+    static func displayName(for playerID: String) -> String {
+        switch playerID {
+        case fitelsonID: return "fitelson"
+        case szwarchID: return "Szwarch Of River Twilight"
+        default: return "Opponent"
+        }
+    }
+}
+
+private enum FamilyMultiplayerError: LocalizedError {
+    case unauthorizedAccount
+    case opponentUnavailable
+    case unexpectedParticipants
+    case friendsAccessDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .unauthorizedAccount:
+            return "Online play is restricted to the two hard-coded Game Center accounts."
+        case .opponentUnavailable:
+            return "Could not load the configured Game Center opponent. Make sure both accounts are Game Center friends."
+        case .unexpectedParticipants:
+            return "This online match has unexpected Game Center participants."
+        case .friendsAccessDenied:
+            return "Enable Friends access for this game in Settings → Game Center to start a new online game. (You can still resume an existing game.)"
+        }
+    }
+}
 
 @MainActor
 @Observable
@@ -11,6 +89,10 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     var authError: String?
     var currentMatch: GKTurnBasedMatch?
     var isWaitingForOpponent = false
+
+    var canUseMultiplayer: Bool {
+        isAuthenticated && FamilyMultiplayer.isAllowed(localPlayerID)
+    }
 
     weak var engine: QuackleEngine?
 
@@ -36,6 +118,25 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         GKLocalPlayer.local.authenticateHandler = { [weak self] viewController, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // GameKit needs to present its sign-in UI — present it instead of
+                // silently dropping it (which left the user stuck on "Signing in…").
+                if let viewController {
+                    #if os(iOS)
+                    let scene = UIApplication.shared.connectedScenes
+                        .compactMap { $0 as? UIWindowScene }
+                        .first { $0.activationState == .foregroundActive }
+                    if let root = scene?.keyWindow?.rootViewController {
+                        root.present(viewController, animated: true)
+                    } else {
+                        self.authError = "Sign in to Game Center in Settings to play online."
+                        self.isAuthenticated = false
+                    }
+                    #else
+                    self.authError = "Sign in to Game Center via System Settings to play online."
+                    self.isAuthenticated = false
+                    #endif
+                    return
+                }
                 if let error {
                     self.authError = error.localizedDescription
                     self.isAuthenticated = false
@@ -46,7 +147,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 if player.isAuthenticated {
                     self.localPlayerID = player.gamePlayerID
                     self.localDisplayName = player.displayName
-                    self.authError = nil
+                    self.authError = self.canUseMultiplayer ? nil : FamilyMultiplayerError.unauthorizedAccount.localizedDescription
                     GKLocalPlayer.local.register(self)
                     // Log friends authorization status for debugging
                     Task {
@@ -61,10 +162,16 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         print("[GameCenter] Friends authorization: \(statusName)")
                     }
                     // Restore any pending turn data from a previous failed submission
-                    if self.pendingTurnData == nil {
-                        self.pendingTurnData = UserDefaults.standard.data(forKey: "pendingTurnData")
+                    if self.pendingTurn == nil {
+                        self.pendingTurn = self.loadPendingTurn()
                     }
-                    self.loadActiveMatch()
+                    if self.canUseMultiplayer {
+                        self.loadActiveMatch()
+                    }
+                } else {
+                    // Completed unauthenticated with no controller/error — don't
+                    // leave the UI stuck on "Signing into Game Center…".
+                    self.authError = "Not signed in to Game Center. Sign in to play online."
                 }
             }
         }
@@ -73,20 +180,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     // MARK: - Load Active Match (on launch)
 
     func loadActiveMatch() {
+        guard canUseMultiplayer else { return }
         Task {
             do {
-                // One-time nuke of all old matches
-                let nukeKey = "matchesNukedBuild5"
-                if !UserDefaults.standard.bool(forKey: nukeKey) {
-                    UserDefaults.standard.set(true, forKey: nukeKey)
-                    let all = try await GKTurnBasedMatch.loadMatches()
-                    print("[GameCenter] NUKING \(all.count) old matches")
-                    for m in all { try? await m.remove() }
-                    self.sharedActiveMatchID = nil
-                    self.pendingTurnData = nil
-                    return
-                }
-
                 // Try to load the shared match ID from iCloud KVS
                 kvStore.synchronize()
                 if let matchID = sharedActiveMatchID {
@@ -95,7 +191,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         let match = try await GKTurnBasedMatch.load(withID: matchID)
                         let playable = (match.status == .open || match.status == .matching)
                         let anyQuit = match.participants.contains { $0.matchOutcome == .quit }
-                        if playable && !anyQuit {
+                        if playable && !anyQuit && isAllowedMatch(match) {
                             self.currentMatch = match
                             print("[GameCenter] Loaded shared match on launch: \(matchID)")
                             self.retryPendingTurn()
@@ -124,8 +220,8 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         }
     }
 
-    /// Loads all matches, removes non-playable ones, returns the best playable match (or nil).
-    /// Used by both loadActiveMatch and findOrCreateMatch for consistent dedup.
+    /// Loads all matches and returns the best playable match (or nil).
+    /// Used by both loadActiveMatch and findOrCreateMatch for consistent selection.
     private func bestPlayableMatch() async throws -> GKTurnBasedMatch? {
         let matches = try await GKTurnBasedMatch.loadMatches()
         print("[GameCenter] Found \(matches.count) existing matches")
@@ -137,9 +233,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             let playable = (match.status == .open || match.status == .matching)
             print("[GameCenter]   status=\(match.status.rawValue) hasData=\(hasData) anyQuit=\(anyQuit)")
 
-            if !playable || anyQuit {
-                print("[GameCenter]   removing non-playable match")
-                try? await match.remove()
+            if !playable || anyQuit || !isAllowedMatch(match) {
                 continue
             }
 
@@ -147,37 +241,73 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 if let data = match.matchData,
                    let state = try? JSONDecoder().decode(MultiplayerGameState.self, from: data),
                    state.isGameOver {
-                    print("[GameCenter]   removing finished match")
-                    try? await match.remove()
                     continue
                 }
             }
 
-            // Remove unpaired empty matches — they block auto-match pairing.
-            // KVS handles same-device sync, so this is safe.
             let fullyPaired = match.participants.allSatisfy { $0.player != nil }
             if !fullyPaired && !hasData {
-                print("[GameCenter]   removing unpaired empty match \(match.matchID)")
-                try? await match.remove()
                 continue
             }
 
-            // Keep the best paired/in-progress match
-            if let existing = best {
-                let existingHasData = existing.matchData != nil && !(existing.matchData?.isEmpty ?? true)
-                if hasData && !existingHasData {
-                    print("[GameCenter]   removing duplicate \(existing.matchID)")
-                    try? await existing.remove()
-                    best = match
-                } else {
-                    print("[GameCenter]   removing duplicate \(match.matchID)")
-                    try? await match.remove()
-                }
-            } else {
+            if best == nil || isBetterPlayableMatch(match, than: best!) {
                 best = match
             }
         }
         return best
+    }
+
+    private func isBetterPlayableMatch(_ candidate: GKTurnBasedMatch, than existing: GKTurnBasedMatch) -> Bool {
+        let candidateHasData = candidate.matchData != nil && !(candidate.matchData?.isEmpty ?? true)
+        let existingHasData = existing.matchData != nil && !(existing.matchData?.isEmpty ?? true)
+        if candidateHasData != existingHasData { return candidateHasData }
+
+        let candidatePaired = candidate.participants.allSatisfy { $0.player != nil }
+        let existingPaired = existing.participants.allSatisfy { $0.player != nil }
+        if candidatePaired != existingPaired { return candidatePaired }
+
+        return candidate.matchID < existing.matchID
+    }
+
+    private func isAllowedMatch(_ match: GKTurnBasedMatch) -> Bool {
+        let resolvedIDs = Set(match.participants.compactMap { $0.player?.gamePlayerID })
+        guard resolvedIDs.isSubset(of: FamilyMultiplayer.allowedIDs) else {
+            return false
+        }
+
+        if let data = match.matchData, !data.isEmpty,
+           let state = try? JSONDecoder().decode(MultiplayerGameState.self, from: data) {
+            return isAllowedState(state, resolvedIDs: resolvedIDs)
+        }
+
+        let fullyPaired = match.participants.allSatisfy { $0.player != nil }
+        if fullyPaired {
+            return resolvedIDs == FamilyMultiplayer.allowedIDs
+        }
+
+        return resolvedIDs.contains(localPlayerID)
+    }
+
+    private func isAllowedState(_ state: MultiplayerGameState, resolvedIDs: Set<String> = []) -> Bool {
+        let stateIDs = Set([state.player1GameCenterID, state.player2GameCenterID].filter { !$0.isEmpty })
+        let knownIDs = stateIDs.union(resolvedIDs)
+        return knownIDs == FamilyMultiplayer.allowedIDs && knownIDs.contains(localPlayerID)
+    }
+
+    private func loadConfiguredOpponent() async throws -> GKPlayer {
+        guard let opponentID = FamilyMultiplayer.opponentID(for: localPlayerID) else {
+            throw FamilyMultiplayerError.unauthorizedAccount
+        }
+        // A new direct invite needs friends access; surface the specific reason.
+        let friendsStatus = (try? await GKLocalPlayer.local.loadFriendsAuthorizationStatus()) ?? .notDetermined
+        if friendsStatus == .denied || friendsStatus == .restricted {
+            throw FamilyMultiplayerError.friendsAccessDenied
+        }
+        let friends = try await GKLocalPlayer.local.loadFriends(identifiedBy: [opponentID])
+        guard let opponent = friends.first(where: { $0.gamePlayerID == opponentID }) else {
+            throw FamilyMultiplayerError.opponentUnavailable
+        }
+        return opponent
     }
 
     // MARK: - Find or Create Match
@@ -185,6 +315,10 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     var isFinding = false
 
     func findOrCreateMatch() {
+        guard canUseMultiplayer else {
+            engine?.errorMessage = FamilyMultiplayerError.unauthorizedAccount.localizedDescription
+            return
+        }
         guard !isFinding else { return }
         isFinding = true
 
@@ -199,18 +333,22 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         let match = try await GKTurnBasedMatch.load(withID: matchID)
                         let playable = (match.status == .open || match.status == .matching)
                         let anyQuit = match.participants.contains { $0.matchOutcome == .quit }
-                        if playable && !anyQuit {
+                        if playable && !anyQuit && self.isAllowedMatch(match) {
                             print("[GameCenter]   using shared match from iCloud KVS")
                             self.handleMatchFound(match)
                             return
                         }
+                        // Shared match is finished/quit/disallowed — clear the stale
+                        // KVS pointer so we don't keep re-loading a dead match.
+                        print("[GameCenter]   shared match no longer playable; clearing KVS")
+                        self.sharedActiveMatchID = nil
                     } catch {
                         print("[GameCenter]   shared match not loadable: \(error.localizedDescription)")
                         self.sharedActiveMatchID = nil
                     }
                 }
 
-                // 2. Find best existing match (cleans up non-playable/duplicates)
+                // 2. Find best existing match without deleting other matches
                 if let match = try await self.bestPlayableMatch() {
                     print("[GameCenter]   using existing match")
                     self.sharedActiveMatchID = match.matchID
@@ -218,13 +356,18 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
 
-                // 3. No match found — create via auto-match
-                print("[GameCenter] Creating auto-match...")
+                // 3. No match found — create a direct invite to the configured opponent
+                print("[GameCenter] Creating configured-opponent match...")
+                let opponent = try await self.loadConfiguredOpponent()
                 let request = GKMatchRequest()
                 request.minPlayers = 2
                 request.maxPlayers = 2
+                request.recipients = [opponent]
                 let match = try await GKTurnBasedMatch.find(for: request)
-                print("[GameCenter] Auto-match created: \(match.matchID)")
+                guard self.isAllowedMatch(match) else {
+                    throw FamilyMultiplayerError.unexpectedParticipants
+                }
+                print("[GameCenter] Configured-opponent match created: \(match.matchID)")
                 self.sharedActiveMatchID = match.matchID
                 self.handleMatchFound(match)
             } catch {
@@ -255,9 +398,12 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 let localScore = state.playerScores[localIdx]
                 let opponentScore = state.playerScores[localIdx == 0 ? 1 : 0]
                 if localScore == opponentScore {
+                    engine.gameResultMessage = "Tie game."
                     gcm.endMatch(matchData: data, outcome: .tied)
                 } else {
-                    gcm.endMatch(matchData: data, localWon: localScore > opponentScore)
+                    let won = localScore > opponentScore
+                    engine.gameResultMessage = won ? "You won!" : "You lost."
+                    gcm.endMatch(matchData: data, localWon: won)
                 }
             } else {
                 gcm.submitTurn(matchData: data)
@@ -266,6 +412,15 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     }
 
     func handleMatchFound(_ match: GKTurnBasedMatch) {
+        guard isAllowedMatch(match) else {
+            print("[GameCenter] Ignoring match with unexpected participants: \(match.matchID)")
+            if sharedActiveMatchID == match.matchID {
+                sharedActiveMatchID = nil
+            }
+            engine?.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
+
         currentMatch = match
         lastLoadedData = nil
         sharedActiveMatchID = match.matchID
@@ -318,11 +473,12 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
         let localID = localPlayerID
         let localName = localDisplayName
-        var opponentName = "Opponent"
-        var opponentID = ""
+        let expectedOpponentID = FamilyMultiplayer.opponentID(for: localID) ?? ""
+        var opponentName = FamilyMultiplayer.displayName(for: expectedOpponentID)
+        var opponentID = expectedOpponentID
 
         for p in participants {
-            if let player = p.player, player.gamePlayerID != localID {
+            if let player = p.player, player.gamePlayerID == expectedOpponentID {
                 opponentName = player.displayName
                 opponentID = player.gamePlayerID
             }
@@ -333,12 +489,17 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             player2Name: opponentName,
             localPlayerIndex: 0,
             player1GameCenterID: localID,
-            player2GameCenterID: opponentID
+            player2GameCenterID: opponentID,
+            matchID: match.matchID
         )
     }
 
     private func loadMatchState(_ state: MultiplayerGameState, from match: GKTurnBasedMatch) {
         guard let engine else { return }
+        guard isAllowedState(state, resolvedIDs: Set(match.participants.compactMap { $0.player?.gamePlayerID })) else {
+            engine.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
 
         // Update display names and IDs from resolved match participants
         var s = state
@@ -356,41 +517,77 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             }
         }
 
+        guard s.player1GameCenterID == localPlayerID || s.player2GameCenterID == localPlayerID else {
+            engine.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
+
         let localIndex = (s.player1GameCenterID == localPlayerID) ? 0 : 1
-        engine.loadMultiplayerState(s, localPlayerIndex: localIndex)
+        engine.loadMultiplayerState(s, localPlayerIndex: localIndex, matchID: match.matchID)
+        // Record what we just loaded so the poll doesn't reload identical data.
+        // Centralized here so EVERY load path (handleMatchFound, poll, turn event)
+        // keeps lastLoadedData in sync — otherwise a poll can reload stale
+        // pre-commit data over an in-flight local move.
+        lastLoadedData = match.matchData
     }
 
     /// Pending turn data for retry if submission fails (persisted across app restarts)
-    var pendingTurnData: Data? {
+    private var pendingTurn: PendingTurn? {
         didSet {
-            if let data = pendingTurnData {
-                UserDefaults.standard.set(data, forKey: "pendingTurnData")
+            if let pendingTurn, let data = try? JSONEncoder().encode(pendingTurn) {
+                UserDefaults.standard.set(data, forKey: "pendingTurn")
             } else {
+                UserDefaults.standard.removeObject(forKey: "pendingTurn")
                 UserDefaults.standard.removeObject(forKey: "pendingTurnData")
             }
         }
     }
+
+    private func loadPendingTurn() -> PendingTurn? {
+        if let data = UserDefaults.standard.data(forKey: "pendingTurn"),
+           let pendingTurn = try? JSONDecoder().decode(PendingTurn.self, from: data) {
+            return pendingTurn
+        }
+        return nil
+    }
+
+    /// True while a submitTurn/runTerminalEnd network Task is in flight, so a
+    /// concurrent retry (poll nudge or scenePhase foreground) can't launch a
+    /// duplicate submission racing the same pendingTurn.
+    private var isSubmitting = false
 
     func submitTurn(matchData: Data) {
         guard let match = currentMatch else {
             print("[GameCenter] submitTurn: no current match!")
             return
         }
+        guard isAllowedMatch(match),
+              let expectedOpponentID = FamilyMultiplayer.opponentID(for: localPlayerID) else {
+            engine?.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
+        // Persist the move FIRST so it survives an early return / app restart and
+        // gets retried — never drop a committed move before the retry net exists.
+        pendingTurn = PendingTurn(matchID: match.matchID, data: matchData)
+
         let nextParticipants = match.participants.filter {
-            $0.player?.gamePlayerID != localPlayerID
+            $0.player?.gamePlayerID == expectedOpponentID
         }
         print("[GameCenter] submitTurn: \(matchData.count) bytes, nextParticipants=\(nextParticipants.count)")
         for p in nextParticipants {
             print("[GameCenter]   next: \(p.player?.displayName ?? "?") id=\(p.player?.gamePlayerID ?? "nil") status=\(p.status.rawValue)")
         }
         guard !nextParticipants.isEmpty else {
-            print("[GameCenter] submitTurn: no next participants!")
+            // Opponent participant not resolved yet (e.g. first move of an unaccepted
+            // invite). The move is saved in pendingTurn and will retry automatically.
+            print("[GameCenter] submitTurn: no resolved opponent participant yet — move queued for retry")
+            engine?.errorMessage = "Opponent isn't ready yet — your move is saved and will send automatically."
             return
         }
 
-        pendingTurnData = matchData
-
+        isSubmitting = true
         Task {
+            defer { self.isSubmitting = false }
             var lastError: Error?
             for attempt in 1...3 {
                 do {
@@ -399,8 +596,16 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     if attempt > 1 {
                         self.currentMatch = freshMatch
                     }
+                    if freshMatch.currentParticipant?.player?.gamePlayerID != self.localPlayerID {
+                        print("[GameCenter] submitTurn attempt \(attempt): turn already advanced; clearing pending turn")
+                        self.pendingTurn = nil
+                        return
+                    }
+                    guard self.isAllowedMatch(freshMatch) else {
+                        throw FamilyMultiplayerError.unexpectedParticipants
+                    }
                     let freshNext = freshMatch.participants.filter {
-                        $0.player?.gamePlayerID != self.localPlayerID
+                        $0.player?.gamePlayerID == expectedOpponentID
                     }
                     guard !freshNext.isEmpty else {
                         print("[GameCenter] submitTurn attempt \(attempt): no next participants")
@@ -412,7 +617,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         match: matchData
                     )
                     print("[GameCenter] submitTurn: SUCCESS (attempt \(attempt))")
-                    self.pendingTurnData = nil
+                    self.pendingTurn = nil
                     return
                 } catch {
                     lastError = error
@@ -426,46 +631,180 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         }
     }
 
-    /// Retry pending turn submission (called on app foreground)
+    /// Retry pending turn submission (called on app foreground and nudged by the poll).
     func retryPendingTurn() {
-        guard let data = pendingTurnData else { return }
-        print("[GameCenter] Retrying pending turn submission...")
-        submitTurn(matchData: data)
+        guard let pendingTurn else { return }
+        // A submission is already running — don't launch a duplicate racing the same move.
+        guard !isSubmitting else { return }
+        guard canUseMultiplayer else {
+            self.pendingTurn = nil
+            return
+        }
+        print("[GameCenter] Retrying pending turn submission for \(pendingTurn.matchID)...")
+        Task {
+            do {
+                let match = try await GKTurnBasedMatch.load(withID: pendingTurn.matchID)
+                guard self.isAllowedMatch(match) else {
+                    print("[GameCenter] pending turn match has unexpected participants; clearing")
+                    self.pendingTurn = nil
+                    return
+                }
+                self.currentMatch = match
+                // A terminal end-match that already landed leaves the match .ended.
+                if pendingTurn.terminal != nil, match.status == .ended {
+                    print("[GameCenter] pending terminal already applied (match ended); clearing")
+                    self.pendingTurn = nil
+                    self.sharedActiveMatchID = nil
+                    return
+                }
+                if match.currentParticipant?.player?.gamePlayerID != self.localPlayerID {
+                    print("[GameCenter] pending turn already submitted or no longer local turn; clearing")
+                    self.pendingTurn = nil
+                    return
+                }
+                if let terminal = pendingTurn.terminal {
+                    self.runTerminalEnd(matchData: pendingTurn.data, terminal: terminal)
+                } else {
+                    self.submitTurn(matchData: pendingTurn.data)
+                }
+            } catch {
+                print("[GameCenter] retryPendingTurn failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     func endMatch(matchData: Data, localWon: Bool? = nil, outcome: GKTurnBasedMatch.Outcome? = nil) {
+        let terminal: TerminalOutcome
+        if outcome == .tied {
+            terminal = .tied
+        } else if let localWon {
+            terminal = localWon ? .won : .lost
+        } else {
+            terminal = .tied
+        }
+        runTerminalEnd(matchData: matchData, terminal: terminal)
+    }
+
+    /// Persist a terminal end-match submission *before* the network call and retry
+    /// it (mirrors submitTurn) so a transient failure cannot permanently lose the
+    /// game-deciding move. Clears state only on confirmed success.
+    private func runTerminalEnd(matchData: Data, terminal: TerminalOutcome) {
         guard let match = currentMatch else { return }
+        guard isAllowedMatch(match) else {
+            engine?.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
+        pendingTurn = PendingTurn(matchID: match.matchID, data: matchData, terminal: terminal)
+
+        isSubmitting = true
+        Task {
+            defer { self.isSubmitting = false }
+            var lastError: Error?
+            for attempt in 1...3 {
+                do {
+                    let fresh = attempt == 1 ? match : try await GKTurnBasedMatch.load(withID: match.matchID)
+                    self.currentMatch = fresh
+                    guard self.isAllowedMatch(fresh) else {
+                        throw FamilyMultiplayerError.unexpectedParticipants
+                    }
+                    // Already ended (a prior attempt or the opponent ended it) → success.
+                    if fresh.status == .ended {
+                        print("[GameCenter] endMatch: already ended; treating as success")
+                        self.finishTerminalSuccess()
+                        return
+                    }
+                    // Must be our turn to end in-turn.
+                    guard fresh.currentParticipant?.player?.gamePlayerID == self.localPlayerID else {
+                        // Turn advanced elsewhere (e.g. opponent timeout) before our
+                        // end landed — the queued terminal data is stale. Tear down the
+                        // match refs so we don't poll/point at a concluded match; the
+                        // local board already shows GAME OVER + the result message.
+                        print("[GameCenter] endMatch attempt \(attempt): not local turn; clearing pending terminal")
+                        self.finishTerminalSuccess()
+                        return
+                    }
+                    self.applyOutcomes(terminal, to: fresh)
+                    try await fresh.endMatchInTurn(withMatch: matchData)
+                    print("[GameCenter] endMatch: SUCCESS (attempt \(attempt))")
+                    self.finishTerminalSuccess()
+                    return
+                } catch {
+                    lastError = error
+                    print("[GameCenter] endMatch attempt \(attempt): FAILED — \(error.localizedDescription)")
+                    if attempt < 3 {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000)
+                    }
+                }
+            }
+            // All attempts failed — keep pendingTurn so retryPendingTurn re-tries later.
+            self.engine?.errorMessage = "Failed to end match after 3 attempts: \(lastError?.localizedDescription ?? "unknown")"
+            self.isWaitingForOpponent = false
+        }
+    }
+
+    private func applyOutcomes(_ terminal: TerminalOutcome, to match: GKTurnBasedMatch) {
         for p in match.participants {
-            if let outcome {
-                p.matchOutcome = outcome
-            } else if let localWon {
-                let isLocal = p.player?.gamePlayerID == localPlayerID
-                p.matchOutcome = isLocal == localWon ? .won : .lost
+            let isLocal = p.player?.gamePlayerID == localPlayerID
+            switch terminal {
+            case .tied: p.matchOutcome = .tied
+            case .won:  p.matchOutcome = isLocal ? .won : .lost
+            case .lost: p.matchOutcome = isLocal ? .lost : .won
             }
         }
-        Task {
-            do {
-                try await match.endMatchInTurn(withMatch: matchData)
-            } catch {
-                self.engine?.errorMessage = "Failed to end match: \(error.localizedDescription)"
-            }
-            self.isWaitingForOpponent = false
+    }
+
+    private func finishTerminalSuccess() {
+        self.pendingTurn = nil
+        self.currentMatch = nil
+        self.sharedActiveMatchID = nil
+        self.isWaitingForOpponent = false
+    }
+
+    /// True if `match` is the game the user is actually in. Events for any *other*
+    /// allowlisted match (a coexisting/orphaned/cross-device duplicate) must not
+    /// hijack or tear down the visible game.
+    private func isActiveMatch(_ match: GKTurnBasedMatch) -> Bool {
+        match.matchID == currentMatch?.matchID || match.matchID == sharedActiveMatchID
+    }
+
+    /// As `isActiveMatch`, but also accepts an event when there is no active game
+    /// yet (bootstrap) — e.g. the opponent moved first and we haven't loaded a
+    /// match on this launch.
+    private func isActiveOrBootstrap(_ match: GKTurnBasedMatch) -> Bool {
+        isActiveMatch(match) || (currentMatch == nil && sharedActiveMatchID == nil)
+    }
+
+    /// Wait (briefly) for the engine's bridge init to complete before restoring a
+    /// match, so an inbound turn event during the launch window can't race the
+    /// staged C++ setup running on bridgeQueue. No-op once initialized.
+    private func waitForEngineInit() async {
+        var waited = 0
+        while engine?.isInitialized != true && waited < 50 {
+            try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1s, up to ~5s
+            waited += 1
         }
     }
 
     func forfeitMatch() {
         guard let match = currentMatch else { return }
+        guard isAllowedMatch(match) else {
+            engine?.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
+            return
+        }
 
         Task {
             do {
                 // Refresh match to get latest participant/turn state
                 let fresh = try await GKTurnBasedMatch.load(withID: match.matchID)
+                guard self.isAllowedMatch(fresh) else {
+                    throw FamilyMultiplayerError.unexpectedParticipants
+                }
                 let isMyTurn = fresh.currentParticipant?.player?.gamePlayerID == localPlayerID
                 print("[GameCenter] forfeit: isMyTurn=\(isMyTurn), status=\(fresh.status.rawValue)")
 
                 if isMyTurn {
                     let nextParticipants = fresh.participants.filter {
-                        $0.player?.gamePlayerID != self.localPlayerID
+                        $0.player?.gamePlayerID == FamilyMultiplayer.opponentID(for: self.localPlayerID)
                     }
                     try await fresh.participantQuitInTurn(
                         with: .quit,
@@ -478,7 +817,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 }
                 print("[GameCenter] forfeit: SUCCESS")
                 self.currentMatch = nil
-                self.pendingTurnData = nil
+                self.pendingTurn = nil
                 self.sharedActiveMatchID = nil
                 self.isWaitingForOpponent = false
                 self.engine?.showModeSelection = true
@@ -500,12 +839,28 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             do {
                 // Use loadMatches() instead of load(withID:) to avoid stale cached data
                 let matches = try await GKTurnBasedMatch.loadMatches()
+                // The active match may have changed while this poll awaited — if so,
+                // this poll is stale; don't act on it (avoids clobbering the new game).
+                guard self.currentMatch?.matchID == match.matchID else {
+                    print("[GameCenter] poll: active match changed mid-poll — discarding stale result")
+                    return
+                }
                 guard let refreshed = matches.first(where: { $0.matchID == match.matchID }) else {
                     print("[GameCenter] poll: match not found in loadMatches() — navigating away")
                     self.isWaitingForOpponent = false
                     self.currentMatch = nil
-                    self.pendingTurnData = nil
+                    self.pendingTurn = nil
+                    self.sharedActiveMatchID = nil
                     self.engine?.isGameOver = false
+                    self.engine?.showModeSelection = true
+                    return
+                }
+                guard self.isAllowedMatch(refreshed) else {
+                    print("[GameCenter] poll: match has unexpected participants — navigating away")
+                    self.isWaitingForOpponent = false
+                    self.currentMatch = nil
+                    self.pendingTurn = nil
+                    self.sharedActiveMatchID = nil
                     self.engine?.showModeSelection = true
                     return
                 }
@@ -527,6 +882,22 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 if opponentQuit {
                     print("[GameCenter] poll: opponent has quit")
                     self.handleMatchEnded(refreshed)
+                    return
+                }
+
+                // Don't clobber an in-flight local move: while we have a pending
+                // submission for THIS match, the server still holds pre-commit data
+                // and reloading it would erase our move and re-enable "Your turn".
+                // Identity-scoped so a stale pending for a different match can't
+                // freeze the visible match's polling.
+                if let pending = self.pendingTurn, pending.matchID == refreshed.matchID {
+                    // Don't reload (would clobber our in-flight local move), but nudge
+                    // the pending submission so a foregrounded session self-heals — e.g.
+                    // we submitted the opening move before the opponent accepted the
+                    // invite, and they've now resolved. retryPendingTurn no-ops if a
+                    // submission is already running (isSubmitting guard).
+                    print("[GameCenter] poll: pending submission for this match — nudging retry instead of reloading")
+                    self.retryPendingTurn()
                     return
                 }
 
@@ -567,6 +938,24 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             guard let self else { return }
             let hasData = match.matchData != nil && !(match.matchData?.isEmpty ?? true)
             print("[GameCenter] receivedTurnEvent: didBecomeActive=\(didBecomeActive), hasData=\(hasData), dataSize=\(match.matchData?.count ?? 0)")
+            guard self.canUseMultiplayer, self.isAllowedMatch(match) else {
+                print("[GameCenter] receivedTurnEvent: ignoring unexpected match \(match.matchID)")
+                return
+            }
+            // Defer until the engine has finished bridge init — restoring over a
+            // half-initialized C++ game can crash (null params before stage 1).
+            await self.waitForEngineInit()
+            guard self.engine?.isInitialized == true else {
+                print("[GameCenter] receivedTurnEvent: engine still not initialized after wait — ignoring")
+                return
+            }
+            // Only the active game (or first-game bootstrap) may take over the
+            // engine. An event for a coexisting/duplicate match must not hijack
+            // the visible game — assigning currentMatch IS the hijack.
+            guard self.isActiveOrBootstrap(match) else {
+                print("[GameCenter] receivedTurnEvent: ignoring non-active match \(match.matchID)")
+                return
+            }
             self.currentMatch = match
 
             // If not in multiplayer mode (e.g., playing AI), just update match reference silently
@@ -594,6 +983,18 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         Task { @MainActor [weak self] in
             guard let self else { return }
             print("[GameCenter] matchEnded callback, status=\(match.status.rawValue)")
+            guard self.canUseMultiplayer, self.isAllowedMatch(match) else { return }
+            // Only tear down for the match we're actually in — a matchEnded for a
+            // stale/duplicate match must not clobber the active game's state.
+            guard self.isActiveMatch(match) else {
+                print("[GameCenter] matchEnded: ignoring non-active match \(match.matchID)")
+                return
+            }
+            await self.waitForEngineInit()
+            guard self.engine?.isInitialized == true else {
+                print("[GameCenter] matchEnded: engine still not initialized after wait — ignoring")
+                return
+            }
             self.currentMatch = match
             guard self.engine?.gameMode == .multiplayer || self.isWaitingForOpponent else { return }
             self.handleMatchEnded(match)
@@ -603,27 +1004,55 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     // MARK: - Match End Handling
 
     private func handleMatchEnded(_ match: GKTurnBasedMatch) {
-        // Determine what happened
         let opponentQuit = match.participants.contains { p in
             p.player?.gamePlayerID != self.localPlayerID && p.matchOutcome == .quit
         }
-        let opponentName = match.participants.first { p in
-            p.player?.gamePlayerID != self.localPlayerID
-        }?.player?.displayName ?? "Opponent"
+        print("[GameCenter] match ended (status=\(match.status.rawValue), opponentQuit=\(opponentQuit))")
 
-        if opponentQuit {
-            print("[GameCenter] opponent \(opponentName) forfeited")
-            self.engine?.errorMessage = "\(opponentName) forfeited the game"
-        } else {
-            print("[GameCenter] match ended (status=\(match.status.rawValue))")
+        // Render the final board so the non-finishing player actually sees the
+        // deciding move, rather than being blind-navigated to mode selection.
+        var rendered = false
+        if let data = match.matchData, !data.isEmpty,
+           let state = try? JSONDecoder().decode(MultiplayerGameState.self, from: data),
+           isAllowedState(state, resolvedIDs: Set(match.participants.compactMap { $0.player?.gamePlayerID })) {
+            loadMatchState(state, from: match)
+            engine?.isGameOver = true
+            rendered = true
         }
 
+        let message = resultMessage(for: match, opponentQuit: opponentQuit)
+
         self.isWaitingForOpponent = false
+        self.pendingTurn = nil
         self.currentMatch = nil
-        self.pendingTurnData = nil
         self.sharedActiveMatchID = nil
-        // Go straight to mode selection so the user isn't stuck on a dead game board
-        self.engine?.isGameOver = false
-        self.engine?.showModeSelection = true
+
+        if rendered {
+            // Stay on the final board and show the result; user taps New to leave.
+            self.engine?.gameResultMessage = message
+            self.engine?.showModeSelection = false
+        } else {
+            // No final state to show (e.g. forfeit before any move) — surface the
+            // result and return to mode selection so the user isn't stuck.
+            self.engine?.gameResultMessage = nil
+            self.engine?.errorMessage = message
+            self.engine?.isGameOver = false
+            self.engine?.showModeSelection = true
+        }
+    }
+
+    /// Human-readable end-of-game result from the authoritative match outcomes.
+    private func resultMessage(for match: GKTurnBasedMatch, opponentQuit: Bool) -> String {
+        if opponentQuit {
+            let oppName = match.participants.first { $0.player?.gamePlayerID != localPlayerID }?.player?.displayName ?? "Opponent"
+            return "\(oppName) forfeited — you win!"
+        }
+        let localOutcome = match.participants.first { $0.player?.gamePlayerID == localPlayerID }?.matchOutcome
+        switch localOutcome {
+        case .won:  return "You won!"
+        case .lost: return "You lost."
+        case .tied: return "Tie game."
+        default:    return "Game over."
+        }
     }
 }
