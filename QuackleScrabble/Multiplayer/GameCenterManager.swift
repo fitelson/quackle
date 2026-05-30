@@ -62,20 +62,14 @@ private enum FamilyMultiplayer {
 
 private enum FamilyMultiplayerError: LocalizedError {
     case unauthorizedAccount
-    case opponentUnavailable
     case unexpectedParticipants
-    case friendsAccessDenied
 
     var errorDescription: String? {
         switch self {
         case .unauthorizedAccount:
-            return "Online play is restricted to the two hard-coded Game Center accounts."
-        case .opponentUnavailable:
-            return "Could not load the configured Game Center opponent. Make sure both accounts are Game Center friends."
+            return "Online play is restricted to the two configured Game Center accounts."
         case .unexpectedParticipants:
             return "This online match has unexpected Game Center participants."
-        case .friendsAccessDenied:
-            return "Enable Friends access for this game in Settings → Game Center to start a new online game. (You can still resume an existing game.)"
         }
     }
 }
@@ -294,22 +288,6 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         return knownIDs == FamilyMultiplayer.allowedIDs && knownIDs.contains(localPlayerID)
     }
 
-    private func loadConfiguredOpponent() async throws -> GKPlayer {
-        guard let opponentID = FamilyMultiplayer.opponentID(for: localPlayerID) else {
-            throw FamilyMultiplayerError.unauthorizedAccount
-        }
-        // A new direct invite needs friends access; surface the specific reason.
-        let friendsStatus = (try? await GKLocalPlayer.local.loadFriendsAuthorizationStatus()) ?? .notDetermined
-        if friendsStatus == .denied || friendsStatus == .restricted {
-            throw FamilyMultiplayerError.friendsAccessDenied
-        }
-        let friends = try await GKLocalPlayer.local.loadFriends(identifiedBy: [opponentID])
-        guard let opponent = friends.first(where: { $0.gamePlayerID == opponentID }) else {
-            throw FamilyMultiplayerError.opponentUnavailable
-        }
-        return opponent
-    }
-
     // MARK: - Find or Create Match
 
     var isFinding = false
@@ -356,18 +334,23 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
 
-                // 3. No match found — create a direct invite to the configured opponent
-                print("[GameCenter] Creating configured-opponent match...")
-                let opponent = try await self.loadConfiguredOpponent()
+                // 3. No match found — auto-match. NOTE: this app's GKTurnBasedMatch pool
+                // only ever contains the two configured accounts (it's a private app),
+                // so auto-match pairs them WITHOUT requiring Game Center friendship
+                // (loadFriends returns 0 here — they aren't friends). isAllowedMatch
+                // still rejects any unexpected participant as defense-in-depth.
+                print("[GameCenter] Creating auto-match...")
                 let request = GKMatchRequest()
                 request.minPlayers = 2
                 request.maxPlayers = 2
-                request.recipients = [opponent]
                 let match = try await GKTurnBasedMatch.find(for: request)
+                // A fresh auto-match has an unresolved opponent slot; isAllowedMatch
+                // permits that (resolved IDs ⊆ allowlist and contains us). It only
+                // rejects once a non-allowed participant actually resolves.
                 guard self.isAllowedMatch(match) else {
                     throw FamilyMultiplayerError.unexpectedParticipants
                 }
-                print("[GameCenter] Configured-opponent match created: \(match.matchID)")
+                print("[GameCenter] Auto-match created: \(match.matchID)")
                 self.sharedActiveMatchID = match.matchID
                 self.handleMatchFound(match)
             } catch {
