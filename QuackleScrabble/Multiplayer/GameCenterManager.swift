@@ -51,6 +51,13 @@ private enum FamilyMultiplayer {
         }
     }
 
+    /// The HOST is the only account allowed to CREATE the shared match; the other (GUEST)
+    /// only joins it. Hard-coded and decided purely from the local player's own ID, so the
+    /// two devices agree on roles with zero coordination — this is what stops both sides
+    /// from each spinning up their own auto-match seat (the "three games" bug).
+    static let hostID = fitelsonID
+    static func isHost(_ playerID: String) -> Bool { playerID == hostID }
+
     static func displayName(for playerID: String) -> String {
         switch playerID {
         case fitelsonID: return "fitelson"
@@ -87,6 +94,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
     var canUseMultiplayer: Bool {
         isAuthenticated && FamilyMultiplayer.isAllowed(localPlayerID)
     }
+
+    /// This device's account is the canonical match creator (see FamilyMultiplayer.hostID).
+    private var localIsHost: Bool { FamilyMultiplayer.isHost(localPlayerID) }
 
     weak var engine: QuackleEngine?
 
@@ -166,6 +176,8 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         guard canUseMultiplayer else { return }
         Task {
             do {
+                // One-time recovery from the accumulated stale-match mess (no-op after first run).
+                await self.resetStaleMatchesOnce()
                 // Try to load the shared match ID from iCloud KVS
                 kvStore.synchronize()
                 if let matchID = sharedActiveMatchID {
@@ -174,13 +186,16 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         let match = try await GKTurnBasedMatch.load(withID: matchID)
                         let playable = (match.status == .open || match.status == .matching)
                         let anyQuit = match.participants.contains { $0.matchOutcome == .quit }
-                        if playable && !anyQuit && isAllowedMatch(match) {
+                        // Only adopt a match that's actually a shared game (paired or has
+                        // data). An unpaired/empty seat in KVS is the stale-pointer bug —
+                        // clear it and fall through so we re-run matchmaking.
+                        if playable && !anyQuit && isAllowedMatch(match) && isPairedOrHasData(match) {
                             self.currentMatch = match
                             print("[GameCenter] Loaded shared match on launch: \(matchID)")
                             self.retryPendingTurn()
                             return
                         } else {
-                            print("[GameCenter] Shared match is no longer playable, clearing")
+                            print("[GameCenter] Shared match not a live shared game (unpaired/finished), clearing")
                             self.sharedActiveMatchID = nil
                         }
                     } catch {
@@ -201,6 +216,85 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 print("[GameCenter] loadActiveMatch error: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// A match worth persisting in iCloud KVS / adopting as the shared game: it has game
+    /// data OR both configured players are resolved participants. A FRESH unpaired
+    /// auto-match seat (opponent slot still nil, no data) is NEITHER — persisting one is
+    /// the bug that locked each device to its own opponent-less game (the "three games").
+    private func isPairedOrHasData(_ m: GKTurnBasedMatch) -> Bool {
+        if let d = m.matchData, !d.isEmpty { return true }
+        let resolved = Set(m.participants.compactMap { $0.player?.gamePlayerID })
+        return m.participants.count >= 2
+            && m.participants.allSatisfy { $0.player != nil }
+            && resolved == FamilyMultiplayer.allowedIDs
+    }
+
+    /// GUEST-only: remove the local player's own UNPAIRED, no-data seeking matches so the
+    /// next find(for:) joins the HOST's open seat instead of returning the guest's own
+    /// orphan. Safe ONLY under the host/guest asymmetry — the host never auto-matches into
+    /// the guest's seat, so removing it can't cancel a pairing the host is mid-join on.
+    /// Once the host HAS joined (match becomes paired), it's skipped here and kept.
+    /// remove() is local-only.
+    private func removeOwnUnpairedMatches() async {
+        guard let matches = try? await GKTurnBasedMatch.loadMatches() else { return }
+        for m in matches {
+            let hasData = m.matchData.map { !$0.isEmpty } ?? false
+            let paired = m.participants.allSatisfy { $0.player != nil }
+            let playable = (m.status == .open || m.status == .matching)
+            if playable && !paired && !hasData {
+                print("[GameCenter] Guest removing own unpaired seat \(m.matchID)")
+                try? await m.remove()
+            }
+        }
+    }
+
+    /// ONE-TIME (per device, per reset-version) cleanup to recover from the accumulated
+    /// "three games" mess: remove every match that is NOT a live shared game — abandoned
+    /// unpaired seats (no opponent, no data), ended matches, and quit matches. KEEPS any
+    /// real paired/has-data game in progress. Then clear the stale KVS pointer. Guarded by
+    /// a UserDefaults flag so it runs only once and can't disrupt future live pairings.
+    private func resetStaleMatchesOnce() async {
+        let key = "didResetStaleMatches_v2"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        if let matches = try? await GKTurnBasedMatch.loadMatches() {
+            for m in matches {
+                let ended = m.status == .ended
+                let anyQuit = m.participants.contains { $0.matchOutcome == .quit }
+                if !isPairedOrHasData(m) || ended || anyQuit {
+                    print("[GameCenter] one-time reset: removing stale match \(m.matchID)")
+                    try? await m.remove()
+                }
+            }
+        }
+        sharedActiveMatchID = nil
+        UserDefaults.standard.set(true, forKey: key)
+        print("[GameCenter] one-time stale-match reset complete")
+    }
+
+    /// HOST-only: the host's single canonical open seat. Returns the host's own playable,
+    /// allowed, UNPAIRED, no-data seat (deterministically the smallest matchID) and REMOVES
+    /// any extras, so (a) repeated taps reuse one seat instead of opening new ones, (b) the
+    /// host's OTHER devices — same Apple ID, same matches in loadMatches() — converge on the
+    /// same seat, and (c) the guest has exactly ONE seat to auto-match into. Returns nil if
+    /// the host has no open seat yet (caller then creates one). Removing extra UNPAIRED seats
+    /// is safe: they hold no opponent, so a guest mid-joining a removed one simply retries
+    /// onto the survivor.
+    private func hostCanonicalSeat() async -> GKTurnBasedMatch? {
+        guard let matches = try? await GKTurnBasedMatch.loadMatches() else { return nil }
+        let seats = matches.filter { m in
+            let hasData = m.matchData.map { !$0.isEmpty } ?? false
+            let paired = m.participants.allSatisfy { $0.player != nil }
+            let playable = (m.status == .open || m.status == .matching)
+            let anyQuit = m.participants.contains { $0.matchOutcome == .quit }
+            return playable && !anyQuit && !paired && !hasData && isAllowedMatch(m)
+        }.sorted { $0.matchID < $1.matchID }
+        guard let canonical = seats.first else { return nil }
+        for extra in seats.dropFirst() {
+            print("[GameCenter] Host consolidating: removing extra seat \(extra.matchID)")
+            try? await extra.remove()
+        }
+        return canonical
     }
 
     /// Loads all matches and returns the best playable match (or nil).
@@ -292,7 +386,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         Task {
             defer { self.isFinding = false }
             do {
-                // 1. Check iCloud KVS for shared match ID from another device
+                // 1. Check iCloud KVS for a shared match (same-user cross-device sync).
+                // Adopt ONLY a real shared game (paired or has data) — never a fresh
+                // unpaired seat, or each device gets re-stuck on its own empty match.
                 kvStore.synchronize()
                 if let matchID = sharedActiveMatchID {
                     print("[GameCenter] Checking shared match \(matchID)...")
@@ -300,14 +396,12 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         let match = try await GKTurnBasedMatch.load(withID: matchID)
                         let playable = (match.status == .open || match.status == .matching)
                         let anyQuit = match.participants.contains { $0.matchOutcome == .quit }
-                        if playable && !anyQuit && self.isAllowedMatch(match) {
+                        if playable && !anyQuit && self.isAllowedMatch(match) && self.isPairedOrHasData(match) {
                             print("[GameCenter]   using shared match from iCloud KVS")
                             self.handleMatchFound(match)
                             return
                         }
-                        // Shared match is finished/quit/disallowed — clear the stale
-                        // KVS pointer so we don't keep re-loading a dead match.
-                        print("[GameCenter]   shared match no longer playable; clearing KVS")
+                        print("[GameCenter]   shared match not a live shared game; clearing KVS")
                         self.sharedActiveMatchID = nil
                     } catch {
                         print("[GameCenter]   shared match not loadable: \(error.localizedDescription)")
@@ -315,32 +409,42 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     }
                 }
 
-                // 2. Find best existing match without deleting other matches
+                // 2. Reuse an existing PAIRED/has-data match if one exists (bestPlayableMatch
+                // already skips unpaired+no-data seats). handleMatchFound writes KVS (gated).
                 if let match = try await self.bestPlayableMatch() {
                     print("[GameCenter]   using existing match")
-                    self.sharedActiveMatchID = match.matchID
                     self.handleMatchFound(match)
                     return
                 }
 
-                // 3. No match found — auto-match. NOTE: this app's GKTurnBasedMatch pool
-                // only ever contains the two configured accounts (it's a private app),
-                // so auto-match pairs them WITHOUT requiring Game Center friendship
-                // (loadFriends returns 0 here — they aren't friends). isAllowedMatch
-                // still rejects any unexpected participant as defense-in-depth.
-                print("[GameCenter] Creating auto-match...")
+                // 3. No shared game yet — create or join via auto-match, ASYMMETRICALLY so
+                // the two accounts can't each spin up their own seat. Only the HOST creates;
+                // the GUEST joins the host's open seat (and never promotes its own empty one).
+                if self.localIsHost {
+                    // Host: reuse my own single canonical seat if I have one (idempotent
+                    // across repeated taps AND across my own devices); only open a new one
+                    // if none exists.
+                    if let seat = await self.hostCanonicalSeat() {
+                        print("[GameCenter] Host: reusing canonical seat \(seat.matchID)")
+                        self.handleMatchFound(seat)
+                        return
+                    }
+                    print("[GameCenter] Host: opening a new match...")
+                } else {
+                    // Guest: drop my own stale empty seats so find() joins the HOST's, not mine.
+                    await self.removeOwnUnpairedMatches()
+                    print("[GameCenter] Guest: joining host's match via auto-match...")
+                }
                 let request = GKMatchRequest()
                 request.minPlayers = 2
                 request.maxPlayers = 2
                 let match = try await GKTurnBasedMatch.find(for: request)
-                // A fresh auto-match has an unresolved opponent slot; isAllowedMatch
-                // permits that (resolved IDs ⊆ allowlist and contains us). It only
-                // rejects once a non-allowed participant actually resolves.
                 guard self.isAllowedMatch(match) else {
                     throw FamilyMultiplayerError.unexpectedParticipants
                 }
-                print("[GameCenter] Auto-match created: \(match.matchID)")
-                self.sharedActiveMatchID = match.matchID
+                print("[GameCenter] find(for:) returned \(match.matchID) paired/hasData=\(self.isPairedOrHasData(match))")
+                // handleMatchFound: host initializes (it may go first into an empty seat);
+                // guest with an unpaired seat just waits for the host (see guard there).
                 self.handleMatchFound(match)
             } catch {
                 print("[GameCenter] Error: \(error.localizedDescription)")
@@ -395,7 +499,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
         currentMatch = match
         lastLoadedData = nil
-        sharedActiveMatchID = match.matchID
+        // Only persist a real shared game to KVS — never a fresh unpaired seat (that was
+        // the bug that made each device resume its own opponent-less match forever).
+        if isPairedOrHasData(match) { sharedActiveMatchID = match.matchID }
         ensureMultiplayerCallback()
 
         let isMyTurn = match.currentParticipant?.player?.gamePlayerID == localPlayerID
@@ -419,11 +525,14 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 return
             }
         }
-        if isMyTurn {
+        // Initialize a fresh game only if I'm to move AND I'm either the host or this is a
+        // real paired/has-data match. A GUEST that lands on its own unpaired seat must NOT
+        // start a game — it has to join the host's match, so it waits instead.
+        if isMyTurn && (localIsHost || isPairedOrHasData(match)) {
             print("[GameCenter] New match — I go first, initializing game")
             self.startNewMultiplayerGame(from: match)
         } else {
-            print("[GameCenter] New match — opponent goes first, waiting")
+            print("[GameCenter] Waiting (opponent's turn, or guest awaiting host's match)")
             self.isWaitingForOpponent = true
             self.engine?.gameMode = .multiplayer
             self.engine?.showModeSelection = false
@@ -466,7 +575,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         )
     }
 
-    private func loadMatchState(_ state: MultiplayerGameState, from match: GKTurnBasedMatch) {
+    private func loadMatchState(_ state: MultiplayerGameState, from match: GKTurnBasedMatch, persistKVS: Bool = true) {
         guard let engine else { return }
         guard isAllowedState(state, resolvedIDs: Set(match.participants.compactMap { $0.player?.gamePlayerID })) else {
             engine.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
@@ -510,6 +619,12 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         // keeps lastLoadedData in sync — otherwise a poll can reload stale
         // pre-commit data over an in-flight local move.
         lastLoadedData = match.matchData
+        // This is unambiguously THE shared game (both players known, local is a
+        // participant, has data). Persist its ID in iCloud KVS from EVERY live load path so
+        // all of this user's devices (same Apple ID) converge on the one same match —
+        // including when the opponent first joins our previously-unpaired seat. Skipped on
+        // the game-over render path (handleMatchEnded clears KVS right after).
+        if persistKVS { sharedActiveMatchID = match.matchID }
     }
 
     /// Pending turn data for retry if submission fails (persisted across app restarts)
@@ -1021,7 +1136,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         if let data = match.matchData, !data.isEmpty,
            let state = try? JSONDecoder().decode(MultiplayerGameState.self, from: data),
            isAllowedState(state, resolvedIDs: Set(match.participants.compactMap { $0.player?.gamePlayerID })) {
-            loadMatchState(state, from: match)
+            // Don't persist KVS here — the match is ending and KVS is cleared just below;
+            // writing then clearing would be a redundant contradictory pair of iCloud writes.
+            loadMatchState(state, from: match, persistKVS: false)
             engine?.isGameOver = true
             rendered = true
         }
