@@ -655,7 +655,16 @@ static std::string nsToStd(NSString *s) {
                 entry.turn = pos.turnNumber();
                 entry.playerIndex = player.id();
                 entry.playerName = uvToNS(player.name());
-                entry.moveDescription = uvToNS(move.toString());
+                // An exchange is hidden information: never reveal WHICH tiles were
+                // swapped (move.toString() would be e.g. "-AIIPU"). Show only the count,
+                // matching real Scrabble — and avoiding leaking a player's rack into the
+                // (serialized, cross-device) multiplayer history.
+                if (move.action == Move::Exchange || move.action == Move::BlindExchange) {
+                    int n = (int)move.tiles().length();
+                    entry.moveDescription = [NSString stringWithFormat:@"Exchanged %d tile%@", n, (n == 1 ? @"" : @"s")];
+                } else {
+                    entry.moveDescription = uvToNS(move.toString());
+                }
                 entry.score = moveScore;
                 entry.totalScore = totals[player.id()];
                 [result addObject:entry];
