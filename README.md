@@ -5,7 +5,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 ## Features
 
 ### Two Game Modes
-- **Play vs AI** — Quackle's NormalPlayer with adjustable skill slider (easy to near-perfect); skill controls both move quality and how much of the bingo vocabulary the AI knows
+- **Play vs AI** — Quackle's NormalPlayer with **two independent sliders**: *AI Skill* (move quality, easy → near-perfect) and *Bingo vocabulary* (the share of bingo words the AI knows, common words first)
 - **Play Online** — Game Center turn-based multiplayer hard-coded for two configured players
 
 ### Gameplay
@@ -17,6 +17,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - **Blank tile picker** — tap a blank, choose a letter from an A-Z grid
 - **Exchange, pass, and new game** support
 - **Move history** and **top 50 candidate moves** views
+- **Game history** — every finished game (online *and* vs AI) is archived with date, opponent, final scores, winner, and a final-board snapshot; synced across each player's own devices via iCloud, browsable from the "…" menu
 - **Board zoom** — double-tap/click to zoom in, drag to pan (drag-and-drop is zoom-aware)
 - **Game persistence** — AI games save board, racks, scores, and bag across app launches; a tile-conservation check (bag + board + racks must total 100) discards any corrupt save and falls back to a fresh game
 - **AI move animation** — opponent tiles flip face-up then fly to board positions
@@ -24,7 +25,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - Uses the **CSW19** dictionary
 
 ### Multiplayer
-- Game Center turn-based auto-match between two configured accounts (allowlist-gated), with iCloud KVS active-match handoff
+- Game Center turn-based auto-match between two configured accounts (allowlist-gated), with iCloud KVS active-match handoff. Pairing is deterministic via a **host/guest** convention — one configured account creates the single shared game (reusing one canonical seat) and the other joins it, so the two players (and each player's own devices) always converge on one game
 - Endgame-adjusted final scores (the unplayed-tiles/deadwood bonus is included in the result and win/loss/tie verdict)
 - Turn submission with 3x retry and exponential backoff; a game-ending move retries too (no lost deciding move)
 - Pending turns persisted by match ID to UserDefaults for cross-restart recovery
@@ -37,11 +38,11 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 ## Current Implementation Notes
 
 - Xcode project generation is driven by `project.yml`; keep Game Center and iCloud KVS entitlements there.
-- AI skill is calibrated so slider midpoint (`0.5`) maps to Quackle `NormalPlayer(meanLoss: 10, stdDev: 6)`.
-- AI bingo vocabulary is a deterministic word-knowledge filter, not a per-turn bingo probability; slider midpoint maps to about 10% raw bingo-word knowledge.
+- AI skill (move quality) is calibrated so the *AI Skill* slider midpoint (`0.5`) maps to Quackle `NormalPlayer(meanLoss: 10, stdDev: 6)`; it's applied at the start of the next new game.
+- *Bingo vocabulary* is a separate, independently-persisted slider (not derived from skill). It's a deterministic **draw-probability** filter calibrated to **true frequency**: a bingo is known iff its full word clears the (1 − knowledge) quantile of CSW19 words **of the same length** (per-length tables in `kBingoQuantile`, extracted from the bundled DAWG by `tools/bingo_calib.py`). So "10%" ≈ the 10% most-probable bingos at each length — common words first, applied immediately.
 - Multiplayer state includes turn number, consecutive scoreless turns, game-over state, racks, bag, board, scores, and move history.
 - Multiplayer is intentionally hard-coded to the two configured Game Center `gamePlayerID`s in `FamilyMultiplayer`; other signed-in accounts and unexpected match participants are rejected. Matchmaking is auto-match (`find(for:)`), which needs no Game Center friendship — the private app's match pool only ever contains the two accounts.
-- Match selection (`bestPlayableMatch`) is non-destructive: it skips finished/unpaired matches but never calls `match.remove()`, because removing an open match orphans the other device's pending Game Center request. Only explicit forfeit/end flows clear the local active match and KVS ID.
+- Matchmaking is host/guest + deterministic: only the host account creates the shared game (reusing one canonical seat via `hostCanonicalSeat`); the guest joins it, and waits if the host hasn't opened one yet. iCloud KVS only ever stores a PAIRED/has-data match (never an empty seat), so devices never get stuck resuming an opponent-less game. `match.remove()` is used only on a player's own empty seats and finished/quit matches — never a live shared game or the partner's seat. (Direct invite is a confirmed dead end: the Game Center friends/player-resolution APIs return empty even with confirmed friendship.)
 - Simulator validation target used during recent fixes: `platform=iOS Simulator,name=iPhone 17 Pro`.
 
 ## Requirements
