@@ -51,12 +51,13 @@ private enum FamilyMultiplayer {
         }
     }
 
-    /// The HOST is the only account allowed to CREATE the shared match; the other (GUEST)
-    /// only joins it. Hard-coded and decided purely from the local player's own ID, so the
-    /// two devices agree on roles with zero coordination — this is what stops both sides
-    /// from each spinning up their own auto-match seat (the "three games" bug).
-    static let hostID = fitelsonID
-    static func isHost(_ playerID: String) -> Bool { playerID == hostID }
+    /// EITHER account may create/initiate a game. The "owner" is only the deterministic
+    /// tiebreak KEEPER — the lexicographically-smaller gamePlayerID. If both happen to
+    /// create a seat in a true-simultaneous race, the owner keeps its seat and the
+    /// non-owner yields and joins it, so the two always converge on one game. Decided
+    /// purely from the local ID (zero coordination).
+    static let ownerID = allowedIDs.min() ?? fitelsonID
+    static func isOwner(_ playerID: String) -> Bool { playerID == ownerID }
 
     static func displayName(for playerID: String) -> String {
         switch playerID {
@@ -95,8 +96,10 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         isAuthenticated && FamilyMultiplayer.isAllowed(localPlayerID)
     }
 
-    /// This device's account is the canonical match creator (see FamilyMultiplayer.hostID).
-    private var localIsHost: Bool { FamilyMultiplayer.isHost(localPlayerID) }
+    /// Whether this device's account is the tiebreak "owner"/keeper (see
+    /// FamilyMultiplayer.ownerID). Either account can initiate; the owner just keeps its
+    /// seat when a simultaneous double-create needs to collapse to one game.
+    private var localIsOwner: Bool { FamilyMultiplayer.isOwner(localPlayerID) }
 
     weak var engine: QuackleEngine?
 
@@ -272,15 +275,15 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         print("[GameCenter] one-time stale-match reset complete")
     }
 
-    /// HOST-only: the host's single canonical open seat. Returns the host's own playable,
-    /// allowed, UNPAIRED, no-data seat (deterministically the smallest matchID) and REMOVES
-    /// any extras, so (a) repeated taps reuse one seat instead of opening new ones, (b) the
-    /// host's OTHER devices — same Apple ID, same matches in loadMatches() — converge on the
-    /// same seat, and (c) the guest has exactly ONE seat to auto-match into. Returns nil if
-    /// the host has no open seat yet (caller then creates one). Removing extra UNPAIRED seats
-    /// is safe: they hold no opponent, so a guest mid-joining a removed one simply retries
-    /// onto the survivor.
-    private func hostCanonicalSeat() async -> GKTurnBasedMatch? {
+    /// The local player's single canonical open seat. Returns its own playable, allowed,
+    /// UNPAIRED, no-data seat (deterministically the smallest matchID) and REMOVES any
+    /// extras, so (a) repeated taps reuse one seat instead of opening new ones, (b) the
+    /// player's OTHER devices — same Apple ID, same matches in loadMatches() — converge on
+    /// the same seat, and (c) there is exactly ONE seat for the opponent to auto-match into.
+    /// Returns nil if there's no open seat yet (caller then creates one). Removing extra
+    /// UNPAIRED seats is safe: they hold no opponent, so a peer mid-joining a removed one
+    /// simply retries onto the survivor.
+    private func ownerCanonicalSeat() async -> GKTurnBasedMatch? {
         guard let matches = try? await GKTurnBasedMatch.loadMatches() else { return nil }
         let seats = matches.filter { m in
             let hasData = m.matchData.map { !$0.isEmpty } ?? false
@@ -417,23 +420,21 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
 
-                // 3. No shared game yet — create or join via auto-match, ASYMMETRICALLY so
-                // the two accounts can't each spin up their own seat. Only the HOST creates;
-                // the GUEST joins the host's open seat (and never promotes its own empty one).
-                if self.localIsHost {
-                    // Host: reuse my own single canonical seat if I have one (idempotent
-                    // across repeated taps AND across my own devices); only open a new one
-                    // if none exists.
-                    if let seat = await self.hostCanonicalSeat() {
-                        print("[GameCenter] Host: reusing canonical seat \(seat.matchID)")
+                // 3. No shared game yet — EITHER of us may create/initiate. Both call
+                // find(for:), which JOINS the opponent's open seat if one exists, else creates
+                // a new one (so the second tapper joins the first's seat). The OWNER reuses
+                // its single canonical seat so it never piles up duplicates; the NON-OWNER
+                // first drops its own stale empty seats so find() prefers joining the owner's.
+                if self.localIsOwner {
+                    if let seat = await self.ownerCanonicalSeat() {
+                        print("[GameCenter] Owner: reusing canonical seat \(seat.matchID)")
                         self.handleMatchFound(seat)
                         return
                     }
-                    print("[GameCenter] Host: opening a new match...")
+                    print("[GameCenter] Owner: creating/joining via auto-match...")
                 } else {
-                    // Guest: drop my own stale empty seats so find() joins the HOST's, not mine.
                     await self.removeOwnUnpairedMatches()
-                    print("[GameCenter] Guest: joining host's match via auto-match...")
+                    print("[GameCenter] Non-owner: creating/joining via auto-match...")
                 }
                 let request = GKMatchRequest()
                 request.minPlayers = 2
@@ -443,8 +444,16 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     throw FamilyMultiplayerError.unexpectedParticipants
                 }
                 print("[GameCenter] find(for:) returned \(match.matchID) paired/hasData=\(self.isPairedOrHasData(match))")
-                // handleMatchFound: host initializes (it may go first into an empty seat);
-                // guest with an unpaired seat just waits for the host (see guard there).
+                // handleMatchFound: whoever created a fresh seat initializes it and goes
+                // first; a joiner waits for the opponent's first move. Convergence is
+                // non-destructive: the common case (one starts, the other joins later, or one
+                // taps slightly first) is handled by find() JOINING the opponent's open seat.
+                // We do NOT auto-yield/destroy a seat after the fact — a non-owner can't even
+                // see the owner's unpaired seat (not a participant), and removing a live seat
+                // would wipe an in-progress opening move. A true sub-second simultaneous
+                // double-create that also slips past GameKit's own dedup is rare and resolves
+                // when either player next taps Play Online (find() then joins the other's seat,
+                // or the owner reuses its canonical seat).
                 self.handleMatchFound(match)
             } catch {
                 print("[GameCenter] Error: \(error.localizedDescription)")
@@ -525,10 +534,11 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 return
             }
         }
-        // Initialize a fresh game only if I'm to move AND I'm either the host or this is a
-        // real paired/has-data match. A GUEST that lands on its own unpaired seat must NOT
-        // start a game — it has to join the host's match, so it waits instead.
-        if isMyTurn && (localIsHost || isPairedOrHasData(match)) {
+        // EITHER player may initiate: whoever is the current participant of a fresh seat
+        // (the creator) initializes the game and goes first; a joiner (isMyTurn == false)
+        // waits for the opponent's first move. Convergence is by find() joining the
+        // opponent's open seat at tap time — no after-the-fact seat destruction.
+        if isMyTurn {
             print("[GameCenter] New match — I go first, initializing game")
             self.startNewMultiplayerGame(from: match)
         } else {
