@@ -30,8 +30,6 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
-    <key>NSGKFriendListUsageDescription</key>
-    <string>Scrabble uses your Game Center friends list to find your opponent.</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

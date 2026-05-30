@@ -170,6 +170,34 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(decoded.totalScore, 42)
     }
 
+    func testMoveHistoryEntryPlayerIndexRoundtrip() throws {
+        let entry = MoveHistoryEntry(turn: 1, playerIndex: 1, playerName: "Bob", moveDescription: "H8 DOG", score: 12, totalScore: 37)
+        let decoded = try JSONDecoder().decode(MoveHistoryEntry.self, from: try JSONEncoder().encode(entry))
+        XCTAssertEqual(decoded.playerIndex, 1)
+        // ...and inside a SavedGameState
+        let saved = SavedGameState(humanFirst: true, skillLevel: 0.5, board: [], players: [],
+                                   bag: [], isGameOver: false, isHumanTurn: true, moveHistory: [entry])
+        let savedDecoded = try JSONDecoder().decode(SavedGameState.self, from: try JSONEncoder().encode(saved))
+        XCTAssertEqual(savedDecoded.moveHistory.first?.playerIndex, 1)
+    }
+
+    func testSavedGameStateGameOverScorelessRoundtrip() throws {
+        // The H2/scoreless persistence shape: game over with adjusted scores + scoreless count.
+        let state = SavedGameState(
+            humanFirst: true, skillLevel: 0.5,
+            board: [[SavedTile(letter: "Q", isBlank: false)]],
+            players: [SavedPlayer(name: "You", isHuman: true, score: 312, rack: []),
+                      SavedPlayer(name: "AI", isHuman: false, score: 298, rack: ["A", "B"])],
+            bag: [], isGameOver: true, isHumanTurn: false, scorelessTurns: 6,
+            moveHistory: [MoveHistoryEntry(turn: 5, playerIndex: 0, playerName: "You", moveDescription: "out", score: 20, totalScore: 312)]
+        )
+        let decoded = try JSONDecoder().decode(SavedGameState.self, from: try JSONEncoder().encode(state))
+        XCTAssertTrue(decoded.isGameOver)
+        XCTAssertEqual(decoded.scorelessTurns, 6)
+        XCTAssertEqual(decoded.players.map(\.score), [312, 298])
+        XCTAssertEqual(decoded.moveHistory.first?.playerIndex, 0)
+    }
+
     // MARK: - MultiplayerGameState Codable
 
     func testMultiplayerGameStateCodableRoundtrip() throws {
@@ -273,5 +301,50 @@ final class ModelTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: payload)
         let decoded = try JSONDecoder().decode(MultiplayerGameState.self, from: data)
         XCTAssertEqual(decoded.turnNumber, 4)
+    }
+
+    func testMultiplayerGameStateLegacyDecodeMissingVersion() throws {
+        // A payload from before `version` existed must still decode, defaulting to 1.
+        let payload: [String: Any] = [
+            "player1GameCenterID": "G:abc123",
+            "player2GameCenterID": "G:def456",
+            "player1DisplayName": "Alice",
+            "player2DisplayName": "Bob",
+            "board": [],
+            "playerScores": [0, 0],
+            "playerRacks": [["A"], ["B"]],
+            "bag": ["C"],
+            "currentPlayerIndex": 0,
+            "moveHistory": [],
+            "isGameOver": false,
+            "consecutiveScorelessTurns": 0
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(MultiplayerGameState.self, from: data)
+        XCTAssertEqual(decoded.version, 1)
+        // Empty history + player-1 to move → inferred turn 1.
+        XCTAssertEqual(decoded.turnNumber, 1)
+    }
+
+    func testMultiplayerGameStateInferredTurnNumberZeroTurnHistory() throws {
+        // History with only turn-0 entries (pregame) → inferred turn 1, not 0/+1.
+        let history = [MoveHistoryEntry(turn: 0, playerName: "Alice", moveDescription: "--", score: 0, totalScore: 0)]
+        let payload: [String: Any] = [
+            "player1GameCenterID": "G:abc123",
+            "player2GameCenterID": "G:def456",
+            "player1DisplayName": "Alice",
+            "player2DisplayName": "Bob",
+            "board": [],
+            "playerScores": [0, 0],
+            "playerRacks": [["A"], ["B"]],
+            "bag": ["C"],
+            "currentPlayerIndex": 1,
+            "moveHistory": try JSONSerialization.jsonObject(with: JSONEncoder().encode(history)),
+            "isGameOver": false,
+            "consecutiveScorelessTurns": 0
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(MultiplayerGameState.self, from: data)
+        XCTAssertEqual(decoded.turnNumber, 1)
     }
 }

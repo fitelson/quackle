@@ -82,8 +82,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (int)scoreMoveString:(NSString *)moveString;
 - (int)scoreMoveStringIgnoringRack:(NSString *)moveString;
 - (BOOL)commitMoveString:(NSString *)moveString;
-- (void)commitPass;
-- (void)commitExchangeWithTiles:(NSString *)tiles;
+// Return whether a move was actually committed (NO if refused, e.g. exchange with
+// fewer than a full rack in the bag, or a C++ exception).
+- (BOOL)commitPass;
+- (BOOL)commitExchangeWithTiles:(NSString *)tiles;
 
 // AI play
 // bingoKnowledge (0..1): deterministic percentage of bingo words the AI knows.
@@ -110,6 +112,7 @@ NS_ASSUME_NONNULL_BEGIN
                         bagTiles:(NSArray<NSString *> *)bag
             currentPlayerIsHuman:(BOOL)humanTurn
                   scorelessTurns:(int)scorelessTurns
+               currentTurnNumber:(int)turnNumber
                         gameOver:(BOOL)gameOver;
 
 // Multiplayer (two human players)

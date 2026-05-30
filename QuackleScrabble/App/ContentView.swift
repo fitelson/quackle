@@ -459,8 +459,9 @@ struct WaitingForOpponentView: View {
             Spacer()
 
             Button("Cancel") {
-                gameCenterManager.isWaitingForOpponent = false
-                engine.showModeSelection = true
+                // Preserve the match so it can be resumed later, but flip out of
+                // multiplayer mode so an inbound first-move event can't yank us back.
+                gameCenterManager.leaveMultiplayerToModeSelection(preserveMatch: true)
             }
             .font(.system(size: 16))
             .buttonStyle(.bordered)

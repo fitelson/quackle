@@ -338,12 +338,18 @@ static std::string nsToStd(NSString *s) {
 
     NSLog(@"QuackleBridge: validateMove position='%s' word='%s'", position.c_str(), word.c_str());
 
-    LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
-    Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
-
-    int result = _game->currentPosition().validateMove(move);
-    NSLog(@"QuackleBridge: validateMove result=%d", result);
-    return result;
+    try {
+        LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
+        Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
+        int result = _game->currentPosition().validateMove(move);
+        NSLog(@"QuackleBridge: validateMove result=%d", result);
+        return result;
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in validateMoveString: %s", e.what());
+        return -1;
+    } catch (...) {
+        return -1;
+    }
 }
 
 - (int)scoreMoveString:(NSString *)moveString {
@@ -357,14 +363,19 @@ static std::string nsToStd(NSString *s) {
     std::string word = str.substr(spacePos + 1);
     if (position.empty() || word.empty()) return 0;
 
-    LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
-    Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
-
-    int validity = _game->currentPosition().validateMove(move);
-    if (validity != 0) return 0;
-
-    _game->currentPosition().scoreMove(move);
-    return move.score;
+    try {
+        LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
+        Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
+        int validity = _game->currentPosition().validateMove(move);
+        if (validity != 0) return 0;
+        _game->currentPosition().scoreMove(move);
+        return move.score;
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in scoreMoveString: %s", e.what());
+        return 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 - (int)scoreMoveStringIgnoringRack:(NSString *)moveString {
@@ -378,15 +389,20 @@ static std::string nsToStd(NSString *s) {
     std::string word = str.substr(spacePos + 1);
     if (position.empty() || word.empty()) return 0;
 
-    LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
-    Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
-
-    // Ignore InvalidTiles (0x0001) — allow hypothetical moves with tiles not on rack
-    int validity = _game->currentPosition().validateMove(move);
-    if ((validity & ~0x0001) != 0) return 0;
-
-    _game->currentPosition().scoreMove(move);
-    return move.score;
+    try {
+        LetterString encodedWord = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(word));
+        Move move = Move::createPlaceMove(MARK_UV(position), encodedWord);
+        // Ignore InvalidTiles (0x0001) — allow hypothetical moves with tiles not on rack
+        int validity = _game->currentPosition().validateMove(move);
+        if ((validity & ~0x0001) != 0) return 0;
+        _game->currentPosition().scoreMove(move);
+        return move.score;
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in scoreMoveStringIgnoringRack: %s", e.what());
+        return 0;
+    } catch (...) {
+        return 0;
+    }
 }
 
 - (BOOL)commitMoveString:(NSString *)moveString {
@@ -423,33 +439,37 @@ static std::string nsToStd(NSString *s) {
     }
 }
 
-- (void)commitPass {
-    if (!_game || !_game->hasPositions()) return;
+- (BOOL)commitPass {
+    if (!_game || !_game->hasPositions()) return NO;
     try {
         _game->commitMove(Move::createPassMove());
+        return YES;
     } catch (const std::exception &e) {
         NSLog(@"QuackleBridge: C++ exception in commitPass: %s", e.what());
     } catch (...) {
         NSLog(@"QuackleBridge: Unknown C++ exception in commitPass");
     }
+    return NO;
 }
 
-- (void)commitExchangeWithTiles:(NSString *)tiles {
-    if (!_game || !_game->hasPositions()) return;
+- (BOOL)commitExchangeWithTiles:(NSString *)tiles {
+    if (!_game || !_game->hasPositions()) return NO;
     try {
         // Rules: cannot exchange unless at least a full rack (7) remains in the bag.
         static const int kFullRack = 7;
         if ((int)_game->currentPosition().bag().size() < kFullRack) {
             NSLog(@"QuackleBridge: refusing exchange — fewer than a full rack in the bag");
-            return;
+            return NO;
         }
         LetterString encodedTiles = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(nsToStd(tiles)));
         _game->commitMove(Move::createExchangeMove(encodedTiles, false));
+        return YES;
     } catch (const std::exception &e) {
         NSLog(@"QuackleBridge: C++ exception in commitExchangeWithTiles: %s", e.what());
     } catch (...) {
         NSLog(@"QuackleBridge: Unknown C++ exception in commitExchangeWithTiles");
     }
+    return NO;
 }
 
 #pragma mark - AI Play
@@ -706,6 +726,7 @@ static std::string nsToStd(NSString *s) {
                         bagTiles:(NSArray<NSString *> *)bagTileLetters
             currentPlayerIsHuman:(BOOL)humanTurn
                   scorelessTurns:(int)scorelessTurns
+               currentTurnNumber:(int)turnNumber
                         gameOver:(BOOL)gameOver {
     try {
         delete _game;
@@ -800,9 +821,11 @@ static std::string nsToStd(NSString *s) {
         int humanId = humanFirst ? 0 : 1;
         int aiId = humanFirst ? 1 : 0;
         _game->currentPosition().setCurrentPlayer(humanTurn ? humanId : aiId);
-        // Symmetric with the two-human restore: restore the scoreless-turn count and
-        // game-over flag so the C++ position matches the Swift model (otherwise the
-        // six-scoreless rule resets to 0 and gameOver() lies after an AI-game reload).
+        // Symmetric with the two-human restore: restore turn number, scoreless count,
+        // and game-over so the C++ position matches the Swift model (otherwise the turn
+        // restarts at 1 — colliding with saved move-history turn numbers — the
+        // six-scoreless rule resets, and gameOver() lies after an AI-game reload).
+        if (turnNumber > 0) _game->currentPosition().setTurnNumber(turnNumber);
         _game->currentPosition().setScorelessTurnsInARow(scorelessTurns);
         _game->currentPosition().setGameOver(gameOver);
 

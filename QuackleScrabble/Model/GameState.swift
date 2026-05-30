@@ -81,11 +81,15 @@ struct SavedGameState: Codable {
     /// Consecutive scoreless turns (for the six-scoreless game-end rule). Defaults to
     /// 0 when decoding a payload from before this field existed.
     let scorelessTurns: Int
+    /// Current C++ turn number, restored so post-restore moves continue the sequence
+    /// (otherwise the bridge restarts at 1 and new history entries collide with saved
+    /// ones on the (turn, playerIndex) dedup key). Defaults to 1 for legacy saves.
+    let turnNumber: Int
     let moveHistory: [MoveHistoryEntry]
 
     init(humanFirst: Bool, skillLevel: Double, board: [[SavedTile?]], players: [SavedPlayer],
          bag: [String], isGameOver: Bool, isHumanTurn: Bool, scorelessTurns: Int = 0,
-         moveHistory: [MoveHistoryEntry], version: Int = 1) {
+         turnNumber: Int = 1, moveHistory: [MoveHistoryEntry], version: Int = 1) {
         self.version = version
         self.humanFirst = humanFirst
         self.skillLevel = skillLevel
@@ -95,11 +99,12 @@ struct SavedGameState: Codable {
         self.isGameOver = isGameOver
         self.isHumanTurn = isHumanTurn
         self.scorelessTurns = scorelessTurns
+        self.turnNumber = turnNumber
         self.moveHistory = moveHistory
     }
 
     enum CodingKeys: String, CodingKey {
-        case version, humanFirst, skillLevel, board, players, bag, isGameOver, isHumanTurn, scorelessTurns, moveHistory
+        case version, humanFirst, skillLevel, board, players, bag, isGameOver, isHumanTurn, scorelessTurns, turnNumber, moveHistory
     }
 
     // Custom decoder: tolerate older saves that lack newer fields (decodeIfPresent +
@@ -115,6 +120,7 @@ struct SavedGameState: Codable {
         isGameOver = try c.decode(Bool.self, forKey: .isGameOver)
         isHumanTurn = try c.decode(Bool.self, forKey: .isHumanTurn)
         scorelessTurns = try c.decodeIfPresent(Int.self, forKey: .scorelessTurns) ?? 0
+        turnNumber = try c.decodeIfPresent(Int.self, forKey: .turnNumber) ?? 1
         moveHistory = try c.decode([MoveHistoryEntry].self, forKey: .moveHistory)
     }
 }

@@ -8,5 +8,8 @@ xcuserdata/
 # macOS
 .DS_Store
 
+# LLVM code-coverage artifacts
+*.profraw
+
 # xcodegen can regenerate this
 QuackleScrabble.xcodeproj/

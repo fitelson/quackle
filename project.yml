@@ -37,8 +37,6 @@ targets:
     sources:
       - path: QuackleScrabble
         type: group
-        excludes:
-          - LaunchScreen.storyboard
       - path: libquackle
         type: group
         compilerFlags:

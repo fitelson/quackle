@@ -259,6 +259,7 @@ class QuackleEngine {
         // mutation behind it (it deletes _game) so it can't run while a previous
         // haveComputerPlay is still using the old _game on the bridge queue.
         cancelAIWork()
+        resetTransientInteractionState()
         withBridgeSync { self.bridge.startNewGame(withHumanName: "You", aiMeanLoss: self.skillMeanLoss, aiStdDev: self.skillStdDev) }
         gameMode = .ai
         showModeSelection = false
@@ -383,8 +384,10 @@ class QuackleEngine {
         let step = boardSquareSizeForDrag + 0.5
         let relX = point.x - boardGridOrigin.x
         let relY = point.y - boardGridOrigin.y
-        let col = Int(relX / step)
-        let row = Int(relY / step)
+        // Int() truncates toward zero, so a drop just above/left of the grid would map
+        // to row/col 0 (landing on A1) — treat negatives as off-board instead.
+        let col = relX >= 0 ? Int(relX / step) : -1
+        let row = relY >= 0 ? Int(relY / step) : -1
 
         let onBoard = row >= 0 && row < board.count &&
                       col >= 0 && col < (board.first?.count ?? 0)
@@ -418,11 +421,20 @@ class QuackleEngine {
     }
 
     func placeBlankAs(letter: String) {
+        // A poll/turn-event reload can fire resetTransientInteractionState (pendingBlank
+        // → -1) while the picker is dismissing; an in-flight button tap must not then
+        // place at (-1,-1).
+        guard pendingBlankRow >= 0, pendingBlankCol >= 0 else {
+            activeSheet = nil
+            return
+        }
         placeTile(letter: letter, isBlank: true, atRow: pendingBlankRow, col: pendingBlankCol)
         activeSheet = nil
     }
 
     func placeTile(letter: String, isBlank: Bool, atRow row: Int, col: Int) {
+        // Bounds-check defensively — callers (blank picker, drag) can race a board reload.
+        guard row >= 0, row < board.count, col >= 0, col < (board.first?.count ?? 0) else { return }
         // Don't place on occupied squares
         if board[row][col].letter != nil { return }
         // Don't place on already-tentatively-placed squares
@@ -515,9 +527,11 @@ class QuackleEngine {
                 // assuming a place move always resets it.
                 self.consecutiveScorelessTurns = Int(self.bridge.scorelessTurns())
                 self.refreshState()
+                // Accumulate history for BOTH modes (the bridge only holds moves since
+                // the last restore, so a full-replace would lose pre-restore history).
+                self.appendLatestMoveToHistory()
                 switch self.gameMode {
                 case .multiplayer:
-                    self.appendLatestMoveToHistory()
                     self.onMultiplayerMoveCommitted?()
                 case .ai:
                     self.triggerAIIfNeeded()
@@ -665,24 +679,9 @@ class QuackleEngine {
 
     // MARK: - History
 
-    private func refreshMoveHistory() {
-        // Don't read _game->history() while the AI is mutating _game on bridgeQueue —
-        // show the last-known history instead (refreshed once the AI move lands).
-        guard !aiComputeInFlight else { return }
-        let entries = bridge.moveHistory()
-        moveHistory = entries.map { entry in
-            MoveHistoryEntry(
-                turn: Int(entry.turn),
-                playerName: entry.playerName,
-                moveDescription: entry.moveDescription,
-                score: Int(entry.score),
-                totalScore: Int(entry.totalScore)
-            )
-        }
-    }
-
     /// Read the bridge's history (which only has moves since last restore)
-    /// and append any new entries to the accumulated moveHistory.
+    /// and append any new entries to the accumulated moveHistory. Used by BOTH
+    /// AI and multiplayer modes — a full-replace would lose pre-restore history.
     private func appendLatestMoveToHistory() {
         let entries = bridge.moveHistory()
         let numPlayers = Int(bridge.numberOfPlayers())
@@ -721,9 +720,8 @@ class QuackleEngine {
     }
 
     func showMoveHistory() {
-        if gameMode != .multiplayer {
-            refreshMoveHistory()
-        }
+        // moveHistory is accumulated incrementally in both modes (appendLatestMoveToHistory),
+        // so no full-replace refresh here — that would drop pre-restore history.
         activeSheet = .history
     }
 
@@ -787,12 +785,16 @@ class QuackleEngine {
             return
         }
         tentativePlacements = []
-        bridge.commitPass()
+        guard bridge.commitPass() else {
+            errorMessage = "Couldn't pass."
+            refreshState()
+            return
+        }
         consecutiveScorelessTurns = Int(bridge.scorelessTurns())
         refreshState()
+        appendLatestMoveToHistory()
         switch gameMode {
         case .multiplayer:
-            appendLatestMoveToHistory()
             onMultiplayerMoveCommitted?()
         case .ai: triggerAIIfNeeded()
         }
@@ -804,12 +806,18 @@ class QuackleEngine {
             return
         }
         tentativePlacements = []
-        bridge.commitExchange(withTiles: tiles)
+        // If the bridge refused (e.g. fewer than 7 tiles left in the bag), don't
+        // advance the turn / submit an unchanged state as if a move occurred.
+        guard bridge.commitExchange(withTiles: tiles) else {
+            errorMessage = "Can't exchange — not enough tiles left in the bag."
+            refreshState()
+            return
+        }
         consecutiveScorelessTurns = Int(bridge.scorelessTurns())
         refreshState()
+        appendLatestMoveToHistory()
         switch gameMode {
         case .multiplayer:
-            appendLatestMoveToHistory()
             onMultiplayerMoveCommitted?()
         case .ai: triggerAIIfNeeded()
         }
@@ -818,7 +826,9 @@ class QuackleEngine {
     // Raw percentage of bingo words the AI knows. This is intentionally
     // non-linear: 50% skill should feel intermediate, not like knowing half
     // of the entire bingo dictionary.
-    var bingoKnowledge: Double { pow(skillLevel, log(0.10) / log(0.5)) }
+    // Clamp before pow: pow(negativeBase, non-integer) is NaN, which would propagate
+    // into the AI gate and trap Int(round(...)) in the skill-slider readout.
+    var bingoKnowledge: Double { pow(min(max(skillLevel, 0.0), 1.0), log(0.10) / log(0.5)) }
 
     private func triggerAIIfNeeded() {
         guard !isHumanTurn, !isGameOver, gameMode == .ai else { return }
@@ -829,6 +839,13 @@ class QuackleEngine {
         aiComputeInFlight = true
         aiTriggerTask?.cancel()
         aiTriggerTask = Task {
+            // Bail BEFORE enqueuing the bridge call if this task was already cancelled
+            // / superseded (a new game started in the same tick) — don't even issue
+            // haveComputerPlay against a game that's gone.
+            guard !Task.isCancelled, gen == self.aiGeneration else {
+                self.aiComputeInFlight = false
+                return
+            }
             let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
                 queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
             }
@@ -841,6 +858,9 @@ class QuackleEngine {
             } else {
                 self.refreshState()
             }
+            // The AI's move is already committed in the bridge — record it so AI
+            // history accumulates and persists (mirrors the human-commit path).
+            self.appendLatestMoveToHistory()
         }
     }
 
@@ -968,8 +988,9 @@ class QuackleEngine {
             }
             updateAvailableRack()
             opponentTileCount = (bridge.rack(forPlayerIndex: opponentIndex) as [String]).count
-            // Don't call refreshMoveHistory() — bridge only has moves since last restore.
-            // History is managed via MultiplayerGameState serialization + appendLatestMoveToHistory().
+            // History is accumulated via appendLatestMoveToHistory() at each commit
+            // (both modes), not rebuilt here — the bridge only holds moves since the
+            // last restore.
         } else {
             // Determine humanFirst from the bridge (player 0's name)
             humanFirst = (bridge.name(forPlayerIndex: 0) == "You")
@@ -1053,6 +1074,7 @@ class QuackleEngine {
             isGameOver: isGameOver,
             isHumanTurn: isHumanTurn,
             scorelessTurns: Int(bridge.scorelessTurns()),
+            turnNumber: Int(bridge.turnNumber()),
             moveHistory: moveHistory
         )
 
@@ -1068,6 +1090,7 @@ class QuackleEngine {
         }
 
         cancelAIWork()
+        resetTransientInteractionState()
         gameMode = .ai
         showModeSelection = false
         gameResultMessage = nil  // never show a stale multiplayer verdict on an AI game
@@ -1098,6 +1121,7 @@ class QuackleEngine {
                 bagTiles: state.bag,
                 currentPlayerIsHuman: state.isHumanTurn,
                 scorelessTurns: Int32(state.scorelessTurns),
+                currentTurnNumber: Int32(state.turnNumber),
                 gameOver: state.isGameOver
             )
         }

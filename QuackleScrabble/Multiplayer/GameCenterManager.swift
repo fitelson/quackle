@@ -143,18 +143,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     self.localDisplayName = player.displayName
                     self.authError = self.canUseMultiplayer ? nil : FamilyMultiplayerError.unauthorizedAccount.localizedDescription
                     GKLocalPlayer.local.register(self)
-                    // Log friends authorization status for debugging
-                    Task {
-                        let friendsStatus = try await GKLocalPlayer.local.loadFriendsAuthorizationStatus()
-                        let statusName = switch friendsStatus {
-                            case .notDetermined: "notDetermined"
-                            case .denied: "denied"
-                            case .restricted: "restricted"
-                            case .authorized: "authorized"
-                            @unknown default: "unknown(\(friendsStatus.rawValue))"
-                        }
-                        print("[GameCenter] Friends authorization: \(statusName)")
-                    }
+                    // (No friends-list usage: matchmaking is auto-match, not direct invite.)
                     // Restore any pending turn data from a previous failed submission
                     if self.pendingTurn == nil {
                         self.pendingTurn = self.loadPendingTurn()
@@ -585,7 +574,9 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 do {
                     // Re-fetch match for retries to get fresh participant state
                     let freshMatch = attempt == 1 ? match : try await GKTurnBasedMatch.load(withID: match.matchID)
-                    if attempt > 1 {
+                    // Only adopt the refreshed match as current if it's still the active
+                    // game — the user may have switched matches during the backoff.
+                    if attempt > 1, self.currentMatch == nil || self.currentMatch?.matchID == freshMatch.matchID {
                         self.currentMatch = freshMatch
                     }
                     if freshMatch.currentParticipant?.player?.gamePlayerID != self.localPlayerID {
@@ -628,8 +619,16 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         guard let pendingTurn else { return }
         // A submission is already running — don't launch a duplicate racing the same move.
         guard !isSubmitting else { return }
+        // Transient !canUseMultiplayer (e.g. a Game Center sign-out blip) must NOT drop
+        // the queued move — keep it and retry once we're authorized again.
         guard canUseMultiplayer else {
-            self.pendingTurn = nil
+            print("[GameCenter] retryPendingTurn: not authorized right now — keeping pending move")
+            return
+        }
+        // Only retry the pending move for the match we're actually in (or none) — don't
+        // pull a non-active match into the engine.
+        guard currentMatch == nil || currentMatch?.matchID == pendingTurn.matchID else {
+            print("[GameCenter] retryPendingTurn: pending is for a non-active match; deferring")
             return
         }
         print("[GameCenter] Retrying pending turn submission for \(pendingTurn.matchID)...")
@@ -700,7 +699,11 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             for attempt in 1...3 {
                 do {
                     let fresh = attempt == 1 ? match : try await GKTurnBasedMatch.load(withID: match.matchID)
-                    self.currentMatch = fresh
+                    // Only adopt the refreshed match as current if it's still the active
+                    // game (the user may have switched away during the backoff).
+                    if self.currentMatch == nil || self.currentMatch?.matchID == fresh.matchID {
+                        self.currentMatch = fresh
+                    }
                     guard self.isAllowedMatch(fresh) else {
                         throw FamilyMultiplayerError.unexpectedParticipants
                     }
@@ -767,9 +770,11 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
     /// As `isActiveMatch`, but also accepts an event when there is no active game
     /// yet (bootstrap) — e.g. the opponent moved first and we haven't loaded a
-    /// match on this launch.
+    /// match on this launch. Excludes the game-over state so a stray event can't
+    /// bootstrap-hijack a finished board the user is still viewing.
     private func isActiveOrBootstrap(_ match: GKTurnBasedMatch) -> Bool {
-        isActiveMatch(match) || (currentMatch == nil && sharedActiveMatchID == nil)
+        if isActiveMatch(match) { return true }
+        return currentMatch == nil && sharedActiveMatchID == nil && engine?.isGameOver != true
     }
 
     /// Wait (briefly) for the engine's bridge init to complete before restoring a
@@ -814,15 +819,8 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     try await fresh.participantQuitOutOfTurn(with: .quit)
                 }
                 print("[GameCenter] forfeit: SUCCESS")
-                self.currentMatch = nil
                 self.pendingTurn = nil
-                self.sharedActiveMatchID = nil
-                self.isWaitingForOpponent = false
-                // Don't leave the engine in .multiplayer with a nil match (poll keys off
-                // gameMode); route to mode selection in a clean, non-game-over state.
-                self.engine?.isGameOver = false
-                self.engine?.gameResultMessage = nil
-                self.engine?.showModeSelection = true
+                self.leaveMultiplayerToModeSelection(preserveMatch: false)
             } catch {
                 print("[GameCenter] forfeit FAILED: \(error.localizedDescription)")
                 self.engine?.errorMessage = "Failed to forfeit: \(error.localizedDescription)"
@@ -958,13 +956,15 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 print("[GameCenter] receivedTurnEvent: ignoring non-active match \(match.matchID)")
                 return
             }
-            self.currentMatch = match
 
-            // If not in multiplayer mode (e.g., playing AI), just update match reference silently
+            // Only take over the engine if we're actually in / awaiting a multiplayer
+            // game. Assigning currentMatch IS the hijack surface, so do NOT install a
+            // non-active match as current when we're in AI mode / on mode selection.
             guard self.engine?.gameMode == .multiplayer || self.isWaitingForOpponent else {
-                print("[GameCenter] receivedTurnEvent: not in multiplayer mode, updating match reference only")
+                print("[GameCenter] receivedTurnEvent: not in multiplayer mode, ignoring event")
                 return
             }
+            self.currentMatch = match
 
             if let data = match.matchData, !data.isEmpty {
                 do {
@@ -1031,16 +1031,32 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
         if rendered {
             // Stay on the final board and show the result; user taps New to leave.
+            // gameMode stays .multiplayer here, but isActiveOrBootstrap's game-over
+            // exclusion prevents a stray event from hijacking the finished board.
             self.engine?.gameResultMessage = message
             self.engine?.showModeSelection = false
         } else {
             // No final state to show (e.g. forfeit before any move) — surface the
-            // result and return to mode selection so the user isn't stuck.
-            self.engine?.gameResultMessage = nil
+            // result and return to mode selection in a clean, non-multiplayer state.
+            self.leaveMultiplayerToModeSelection(preserveMatch: false)
             self.engine?.errorMessage = message
-            self.engine?.isGameOver = false
-            self.engine?.showModeSelection = true
         }
+    }
+
+    /// Exit a multiplayer game to mode selection in a coherent state. Crucially flips
+    /// gameMode off .multiplayer so the globally-registered turn-event listener can't
+    /// re-hijack the UI back into the (cancelled/ended) game. Pass preserveMatch:true
+    /// to keep currentMatch/KVS for a later resume (e.g. a deliberate Cancel).
+    func leaveMultiplayerToModeSelection(preserveMatch: Bool) {
+        isWaitingForOpponent = false
+        if !preserveMatch {
+            currentMatch = nil
+            sharedActiveMatchID = nil
+        }
+        engine?.gameMode = .ai
+        engine?.isGameOver = false
+        engine?.gameResultMessage = nil
+        engine?.showModeSelection = true
     }
 
     /// Human-readable end-of-game result from the authoritative match outcomes.

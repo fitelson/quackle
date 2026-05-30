@@ -18,11 +18,14 @@ struct AIAnimationOverlay: View {
                 spacing: rackSpacing,
                 totalCount: totalRack
             )
-            let boardPos = engine.boardPositionForSquare(
+            // boardPositionForSquare returns an UNZOOMED "game"-space point; the board
+            // is zoomed/panned inside BoardView, so transform the board target through
+            // the same scaleEffect(anchor:)+offset so fly-in tiles land on the square.
+            let boardPos = boardVisualPosition(engine.boardPositionForSquare(
                 row: tile.targetRow,
                 col: tile.targetCol
-            )
-            let boardSize = engine.boardSquareSizeForDrag
+            ))
+            let boardSize = engine.boardSquareSizeForDrag * engine.boardZoomScale
 
             // Phase 0: blank at rack, Phase 1: face-up at rack, Phase 2: face-up at board
             let atBoard = phase >= 2
@@ -56,5 +59,22 @@ struct AIAnimationOverlay: View {
             )
             .position(targetPos)
         }
+    }
+
+    /// Forward transform of an unzoomed "game"-space point into the board's current
+    /// zoomed/panned screen position — the inverse of endDrag()'s drop math.
+    private func boardVisualPosition(_ p: CGPoint) -> CGPoint {
+        var point = p
+        let scale = engine.boardZoomScale
+        if scale != 1.0 {
+            let frame = engine.boardGeoFrame
+            let anchorX = frame.minX + engine.boardZoomAnchor.x * frame.width
+            let anchorY = frame.minY + engine.boardZoomAnchor.y * frame.height
+            point.x = (point.x - anchorX) * scale + anchorX
+            point.y = (point.y - anchorY) * scale + anchorY
+        }
+        point.x += engine.boardPanOffset.width
+        point.y += engine.boardPanOffset.height
+        return point
     }
 }
