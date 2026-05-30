@@ -1062,7 +1062,9 @@ class QuackleEngine {
 
         let savedBoard: [[SavedTile?]] = board.map { row in
             row.map { square in
-                guard let letter = square.letter else { return nil }
+                // Never persist a non-letter cell. A "." (played-thru mark) must not be
+                // saved as a tile — restoring it would corrupt the board.
+                guard let letter = square.letter, !letter.isEmpty, letter != "." else { return nil }
                 return SavedTile(letter: letter, isBlank: square.isBlank)
             }
         }
@@ -1110,6 +1112,25 @@ class QuackleEngine {
             return false
         }
 
+        // Tile-conservation guard: a valid English position ALWAYS has exactly 100 tiles
+        // distributed across bag + board + racks. An older binary could persist a
+        // split-brain save (e.g. a fresh 86-tile bag alongside a populated board and
+        // played-thru "." cells). Such a save can never restore to a coherent board —
+        // discard it and fall back to a new game rather than present a broken one.
+        let boardTileCount = state.board.reduce(0) { acc, row in
+            acc + row.reduce(0) { inner, tile in
+                guard let letter = tile?.letter, !letter.isEmpty, letter != "." else { return inner }
+                return inner + 1
+            }
+        }
+        let rackTileCount = state.players.reduce(0) { $0 + $1.rack.count }
+        let totalTiles = state.bag.count + boardTileCount + rackTileCount
+        if totalTiles != 100 {
+            print("[QuackleEngine] Saved game tile count \(totalTiles) != 100 (bag=\(state.bag.count) board=\(boardTileCount) racks=\(rackTileCount)) — discarding corrupt save")
+            UserDefaults.standard.removeObject(forKey: "savedGameState")
+            return false
+        }
+
         cancelAIWork()
         resetTransientInteractionState()
         gameMode = .ai
@@ -1145,6 +1166,14 @@ class QuackleEngine {
                 currentTurnNumber: Int32(state.turnNumber),
                 gameOver: state.isGameOver
             )
+        }
+
+        // The bridge fails closed (deletes the half-built game) if the restore threw.
+        // Detect that and discard the corrupt save rather than presenting a broken board.
+        guard Int(bridge.numberOfPlayers()) > 0 else {
+            print("[QuackleEngine] Restore produced no game — discarding corrupt saved game")
+            UserDefaults.standard.removeObject(forKey: "savedGameState")
+            return false
         }
 
         humanFirst = state.humanFirst
@@ -1327,7 +1356,9 @@ class QuackleEngine {
     func exportMultiplayerState() -> MultiplayerGameState {
         let savedBoard: [[SavedTile?]] = board.map { row in
             row.map { square in
-                guard let letter = square.letter else { return nil }
+                // Never persist a non-letter cell. A "." (played-thru mark) must not be
+                // saved as a tile — restoring it would corrupt the board.
+                guard let letter = square.letter, !letter.isEmpty, letter != "." else { return nil }
                 return SavedTile(letter: letter, isBlank: square.isBlank)
             }
         }

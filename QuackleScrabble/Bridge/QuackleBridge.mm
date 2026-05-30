@@ -174,9 +174,12 @@ static std::string nsToStd(NSString *s) {
 - (NSString *)letterAtRow:(int)row col:(int)col {
     if (!_game || !_game->hasPositions()) return @"";
     const Board &board = _game->currentPosition().board();
-    if (board.letter(row, col) == QUACKLE_NULL_MARK) return @"";
-
     Letter letter = board.letter(row, col);
+    // Treat both the empty mark and the played-thru mark (".", byte 2) as empty. A
+    // played-thru mark is never a real tile; surfacing it as a "." cell would let it
+    // round-trip into the saved board and corrupt the game.
+    if (letter == QUACKLE_NULL_MARK || !QUACKLE_ALPHABET_PARAMETERS->isSomeLetter(letter)) return @"";
+
     UVString str = QUACKLE_ALPHABET_PARAMETERS->userVisible(letter);
     return uvToNS(str);
 }
@@ -189,7 +192,10 @@ static std::string nsToStd(NSString *s) {
 
 - (BOOL)isVacantAtRow:(int)row col:(int)col {
     if (!_game || !_game->hasPositions()) return YES;
-    return _game->currentPosition().board().letter(row, col) == QUACKLE_NULL_MARK;
+    Letter letter = _game->currentPosition().board().letter(row, col);
+    // A played-thru mark (".", byte 2) is not a real tile — report it as vacant so it
+    // never reaches the model board, the display, or the saved game.
+    return letter == QUACKLE_NULL_MARK || !QUACKLE_ALPHABET_PARAMETERS->isSomeLetter(letter);
 }
 
 - (int)letterMultiplierAtRow:(int)row col:(int)col {
@@ -765,43 +771,9 @@ static std::string nsToStd(NSString *s) {
         _game->associateKnownComputerPlayers();
         _game->addPosition();
 
-        // Restore board by placing each tile
-        Board board;
-        board.prepareEmptyBoard();
-
-        int rows = (int)boardLetters.count;
-        for (int row = 0; row < rows; ++row) {
-            NSArray<NSString *> *rowLetters = boardLetters[row];
-            // Guard the OUTER index too: corrupted/mismatched GameKit data can give
-            // boardBlanks fewer rows than boardLetters, and an out-of-bounds NSArray
-            // subscript throws NSRangeException (which the C++ catch(...) won't reliably
-            // catch → abort).
-            if (row >= (int)boardBlanks.count) continue;
-            NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
-            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
-            int cols = (int)rowLetters.count;
-            for (int col = 0; col < cols; ++col) {
-                NSString *letter = rowLetters[col];
-                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
-
-                BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
-                std::string letterStr;
-                if (isBlank) {
-                    letterStr = std::string(1, tolower([letter UTF8String][0]));
-                } else {
-                    letterStr = nsToStd(letter);
-                }
-
-                std::string pos = std::to_string(row + 1) + std::string(1, char('A' + col));
-                LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(letterStr));
-                Move move = Move::createPlaceMove(MARK_UV(pos), encoded);
-                board.makeMove(move);
-            }
-        }
-
-        _game->currentPosition().setBoard(board);
-        _game->currentPosition().ensureBoardIsPreparedForAnalysis();
-
+        // Set the SCALAR position fields FIRST (before the fault-prone board work), so
+        // that if board prep ever throws, bag/turn/scores stay consistent with the saved
+        // game instead of the fresh values addPosition() seeded (bag=86, turn=1).
         // Restore bag using LongLetterString (LetterString is fixed-length, max 40)
         LongLetterString bagLong;
         for (NSString *letter in bagTileLetters) {
@@ -826,25 +798,71 @@ static std::string nsToStd(NSString *s) {
             _game->currentPosition().setPlayerRack(playerId, Rack(rackTiles), false);
         }
 
-        // Set current player
         int humanId = humanFirst ? 0 : 1;
         int aiId = humanFirst ? 1 : 0;
         _game->currentPosition().setCurrentPlayer(humanTurn ? humanId : aiId);
-        // Symmetric with the two-human restore: restore turn number, scoreless count,
-        // and game-over so the C++ position matches the Swift model (otherwise the turn
-        // restarts at 1 — colliding with saved move-history turn numbers — the
-        // six-scoreless rule resets, and gameOver() lies after an AI-game reload).
         if (turnNumber > 0) _game->currentPosition().setTurnNumber(turnNumber);
         _game->currentPosition().setScorelessTurnsInARow(scorelessTurns);
         _game->currentPosition().setGameOver(gameOver);
+
+        // Restore board LAST by placing each tile (this + ensureBoardIsPreparedForAnalysis
+        // is the fault-prone part — it walks the GADDAG, which may be absent).
+        Board board;
+        board.prepareEmptyBoard();
+
+        int rows = (int)boardLetters.count;
+        for (int row = 0; row < rows; ++row) {
+            NSArray<NSString *> *rowLetters = boardLetters[row];
+            if (row >= (int)boardBlanks.count) continue;  // mismatched arrays → skip row
+            NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
+            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
+            int cols = (int)rowLetters.count;
+            for (int col = 0; col < cols; ++col) {
+                NSString *letter = rowLetters[col];
+                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
+
+                BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
+                std::string letterStr;
+                if (isBlank) {
+                    letterStr = std::string(1, (char)tolower((unsigned char)[letter UTF8String][0]));
+                } else {
+                    letterStr = nsToStd(letter);
+                }
+
+                LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(letterStr));
+                // CRITICAL: only place a single REAL letter. A saved "." (the played-thru
+                // mark, byte 2) encodes to a non-letter and must NOT be written as a tile —
+                // otherwise it round-trips as a literal "." board tile and corrupts the game.
+                if (encoded.length() != 1 || !QUACKLE_ALPHABET_PARAMETERS->isSomeLetter(encoded[0])) continue;
+
+                std::string pos = std::to_string(row + 1) + std::string(1, char('A' + col));
+                Move move = Move::createPlaceMove(MARK_UV(pos), encoded);
+                board.makeMove(move);
+            }
+        }
+
+        _game->currentPosition().setBoard(board);
+        _game->currentPosition().ensureBoardIsPreparedForAnalysis();
+
+        // CRITICAL: addPosition() recorded the history's currentLocation = (player, turn)
+        // BEFORE we applied the saved currentPlayer + turnNumber. A GamePosition's location
+        // is (currentPlayer().id(), turnNumber()), so those setters moved this position's
+        // location while currentLocation stayed stale. The next commitMove() does
+        // addClonePosition() → eraseAfter(currentLocation), which would erase THIS position
+        // (its location now sorts after the stale one) and leave the list empty → a FRESH
+        // GamePosition (bag=86, turn=1, empty board): the whole restored board vanishes on
+        // the first move. Re-sync currentLocation so commit clones this position instead.
+        _game->setCurrentPosition(_game->currentPosition().location());
 
         NSLog(@"QuackleBridge: Game restored — %@ vs AI, bag=%d tiles, %@ to play, scoreless=%d, gameOver=%@",
               name, (int)_game->currentPosition().bag().size(),
               humanTurn ? name : @"AI", scorelessTurns, gameOver ? @"YES" : @"NO");
     } catch (const std::exception &e) {
-        NSLog(@"QuackleBridge: C++ exception in restoreGame: %s", e.what());
+        NSLog(@"QuackleBridge: C++ exception in restoreGame: %s — discarding partial game", e.what());
+        delete _game; _game = nullptr;  // fail closed: never leave a half-restored game
     } catch (...) {
-        NSLog(@"QuackleBridge: Unknown C++ exception in restoreGame");
+        NSLog(@"QuackleBridge: Unknown C++ exception in restoreGame — discarding partial game");
+        delete _game; _game = nullptr;
     }
 }
 
@@ -901,43 +919,9 @@ static std::string nsToStd(NSString *s) {
         _game->setPlayers(players);
         _game->addPosition();
 
-        // Restore board
-        Board board;
-        board.prepareEmptyBoard();
-
-        int rows = (int)boardLetters.count;
-        for (int row = 0; row < rows; ++row) {
-            NSArray<NSString *> *rowLetters = boardLetters[row];
-            // Guard the OUTER index too: corrupted/mismatched GameKit data can give
-            // boardBlanks fewer rows than boardLetters, and an out-of-bounds NSArray
-            // subscript throws NSRangeException (which the C++ catch(...) won't reliably
-            // catch → abort).
-            if (row >= (int)boardBlanks.count) continue;
-            NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
-            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
-            int cols = (int)rowLetters.count;
-            for (int col = 0; col < cols; ++col) {
-                NSString *letter = rowLetters[col];
-                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
-
-                BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
-                std::string letterStr;
-                if (isBlank) {
-                    letterStr = std::string(1, tolower([letter UTF8String][0]));
-                } else {
-                    letterStr = nsToStd(letter);
-                }
-
-                std::string pos = std::to_string(row + 1) + std::string(1, char('A' + col));
-                LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(letterStr));
-                Move move = Move::createPlaceMove(MARK_UV(pos), encoded);
-                board.makeMove(move);
-            }
-        }
-
-        _game->currentPosition().setBoard(board);
-        _game->currentPosition().ensureBoardIsPreparedForAnalysis();
-
+        // Set the SCALAR position fields FIRST (before the fault-prone board work), so
+        // that if board prep throws, bag/turn/scores stay consistent with the saved game
+        // instead of the fresh values addPosition() seeded.
         // Restore bag
         LongLetterString bagLong;
         for (NSString *letter in bagTileLetters) {
@@ -962,19 +946,62 @@ static std::string nsToStd(NSString *s) {
             _game->currentPosition().setPlayerRack(playerId, Rack(rackTiles), false);
         }
 
-        // Set current player
         _game->currentPosition().setCurrentPlayer(currentIdx);
         _game->currentPosition().setTurnNumber(turnNumber);
         _game->currentPosition().setScorelessTurnsInARow(scorelessTurns);
         _game->currentPosition().setGameOver(gameOver);
 
+        // Restore board LAST (fault-prone — placeMove + ensureBoardIsPreparedForAnalysis).
+        Board board;
+        board.prepareEmptyBoard();
+
+        int rows = (int)boardLetters.count;
+        for (int row = 0; row < rows; ++row) {
+            NSArray<NSString *> *rowLetters = boardLetters[row];
+            if (row >= (int)boardBlanks.count) continue;  // mismatched arrays → skip row
+            NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
+            if (![rowLetters isKindOfClass:[NSArray class]]) continue;
+            int cols = (int)rowLetters.count;
+            for (int col = 0; col < cols; ++col) {
+                NSString *letter = rowLetters[col];
+                if (![letter isKindOfClass:[NSString class]] || letter.length == 0) continue;
+
+                BOOL isBlank = (col < (int)rowBlanks.count) ? [rowBlanks[col] boolValue] : NO;
+                std::string letterStr;
+                if (isBlank) {
+                    letterStr = std::string(1, (char)tolower((unsigned char)[letter UTF8String][0]));
+                } else {
+                    letterStr = nsToStd(letter);
+                }
+
+                LetterString encoded = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(letterStr));
+                // CRITICAL: only place a single REAL letter — never a saved "." (played-thru
+                // mark, byte 2), which would round-trip as a literal board tile and corrupt
+                // the game. See restoreGameWithHumanName: for the full rationale.
+                if (encoded.length() != 1 || !QUACKLE_ALPHABET_PARAMETERS->isSomeLetter(encoded[0])) continue;
+
+                std::string pos = std::to_string(row + 1) + std::string(1, char('A' + col));
+                Move move = Move::createPlaceMove(MARK_UV(pos), encoded);
+                board.makeMove(move);
+            }
+        }
+
+        _game->currentPosition().setBoard(board);
+        _game->currentPosition().ensureBoardIsPreparedForAnalysis();
+
+        // See restoreGameWithHumanName: — re-sync currentLocation after setCurrentPlayer/
+        // setTurnNumber so the next commit clones this position instead of wiping it.
+        _game->setCurrentPosition(_game->currentPosition().location());
+
         NSLog(@"QuackleBridge: Two-human game restored — %@ vs %@, bag=%d tiles, player %d turn %d, scoreless=%d, gameOver=%@",
               name1, name2, (int)_game->currentPosition().bag().size(), currentIdx,
               turnNumber, scorelessTurns, gameOver ? @"YES" : @"NO");
     } catch (const std::exception &e) {
-        NSLog(@"QuackleBridge: C++ exception in restoreTwoHumanGame: %s", e.what());
+        NSLog(@"QuackleBridge: C++ exception in restoreTwoHumanGame: %s — discarding partial game", e.what());
+        delete _game; _game = nullptr;  // fail closed: never leave a half-restored game
     } catch (...) {
-        NSLog(@"QuackleBridge: Unknown C++ exception in restoreTwoHumanGame");
+        NSLog(@"QuackleBridge: Unknown C++ exception in restoreTwoHumanGame — discarding partial game");
+        delete _game; _game = nullptr;
     }
 }
 

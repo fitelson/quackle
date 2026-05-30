@@ -18,7 +18,7 @@ A personal Scrabble app for iPhone and Mac, built with SwiftUI and the [Quackle]
 - **Exchange, pass, and new game** support
 - **Move history** and **top 50 candidate moves** views
 - **Board zoom** — double-tap/click to zoom in, drag to pan (drag-and-drop is zoom-aware)
-- **Game persistence** — AI games save board, racks, scores, and bag across app launches
+- **Game persistence** — AI games save board, racks, scores, and bag across app launches; a tile-conservation check (bag + board + racks must total 100) discards any corrupt save and falls back to a fresh game
 - **AI move animation** — opponent tiles flip face-up then fly to board positions
 - **Coin flip** determines who goes first in AI games
 - Uses the **CSW19** dictionary
