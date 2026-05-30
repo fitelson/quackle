@@ -128,11 +128,53 @@ class QuackleEngine {
     var aiAnimPhase: Int = 0  // 0=face-down at rack, 1=face-up at rack, 2=face-up flying to board
     var aiAnimTiles: [AIAnimTile] = []
     var opponentRackOrigin: CGPoint = .zero  // top-left of opponent rack in "game" space
-    var opponentTileSize: CGFloat = 24
     private var animationTask: Task<Void, Never>?
+    /// Tracks the in-flight AI compute/trigger so a game (re)start can invalidate it.
+    private var aiTriggerTask: Task<Void, Never>?
+    /// True while `haveComputerPlay` is running on the bridge queue. Read on MainActor
+    /// to avoid touching `_game` (e.g. saveGameState) concurrently with AI mutation.
+    private var aiComputeInFlight = false
+    /// Bumped on every game (re)start/restore so a stale AI result is discarded.
+    private var aiGeneration = 0
 
     private let bridge: QuackleBridge = QuackleBridge.shared()
     private let bridgeQueue = DispatchQueue(label: "com.bef.quackle.bridge")
+
+    /// Run a destructive bridge mutation (new game / restore — which `delete _game`)
+    /// serially on the bridge queue so it cannot run while a `haveComputerPlay` is
+    /// still dereferencing the old `_game` on that queue (use-after-free). Blocks the
+    /// caller briefly (only when an AI compute is mid-flight) and keeps callers sync.
+    private func withBridgeSync(_ body: @escaping () -> Void) {
+        bridgeQueue.sync(execute: body)
+    }
+
+    /// Clear transient interaction state that must not survive a state reload (e.g. an
+    /// opponent move arriving via poll while you were exchanging/dragging/picking a blank).
+    /// Cancels an in-flight hypothetical drag cleanly rather than letting endDrag drop it
+    /// against rebuilt (new-UUID) rack tiles.
+    private func resetTransientInteractionState() {
+        isExchangeMode = false
+        exchangeSelectedIds = []
+        activeDragSource = nil
+        rackReorderIndex = nil
+        if activeSheet == .blankPicker { activeSheet = nil }
+        pendingBlankRow = -1
+        pendingBlankCol = -1
+    }
+
+    /// Invalidate any in-flight/pending AI work; call at every game (re)start/restore.
+    private func cancelAIWork() {
+        aiGeneration &+= 1
+        aiTriggerTask?.cancel()
+        aiTriggerTask = nil
+        animationTask?.cancel()
+        animationTask = nil
+        // The discarded AI Task's continuation would normally reset this, but it can't
+        // run until the current synchronous MainActor call returns — and callers run a
+        // withBridgeSync (draining the queue, so _game is stable) right after. Reset now
+        // so the new game's first saveGameState isn't skipped.
+        aiComputeInFlight = false
+    }
 
     private var canCommitCurrentTurn: Bool {
         guard !isGameOver else { return false }
@@ -213,7 +255,11 @@ class QuackleEngine {
 
     func startNewGame() {
         UserDefaults.standard.removeObject(forKey: "savedGameState")
-        bridge.startNewGame(withHumanName: "You", aiMeanLoss: skillMeanLoss, aiStdDev: skillStdDev)
+        // Invalidate any in-flight AI work and serialize the destructive bridge
+        // mutation behind it (it deletes _game) so it can't run while a previous
+        // haveComputerPlay is still using the old _game on the bridge queue.
+        cancelAIWork()
+        withBridgeSync { self.bridge.startNewGame(withHumanName: "You", aiMeanLoss: self.skillMeanLoss, aiStdDev: self.skillStdDev) }
         gameMode = .ai
         showModeSelection = false
         tentativePlacements = []
@@ -228,9 +274,11 @@ class QuackleEngine {
         // across game mode switches so multiplayer moves always get submitted.
         refreshState()
         if !isHumanTurn {
+            let gen = aiGeneration
             Task {
                 try? await Task.sleep(nanoseconds: 300_000_000)
-                triggerAIIfNeeded()
+                guard gen == self.aiGeneration else { return }  // a newer game started
+                self.triggerAIIfNeeded()
             }
         }
     }
@@ -238,7 +286,9 @@ class QuackleEngine {
     // MARK: - Drag and Drop
 
     func startDragFromRack(tile: TileModel) {
-        let canDrag = isLocalPlayerTurn || (gameMode == .multiplayer && !isLocalPlayerTurn)
+        // Allow on your own turn, or in multiplayer off-turn for hypothetical moves —
+        // but never on a finished board.
+        let canDrag = !isGameOver && (gameMode == .multiplayer || isLocalPlayerTurn)
         guard !isAnimatingAIMove, canDrag else { return }
         activeDragSource = .rack(tileId: tile.id)
         activeDragLetter = tile.isBlank ? "?" : tile.letter
@@ -250,7 +300,9 @@ class QuackleEngine {
     }
 
     func startDragFromBoard(row: Int, col: Int) {
-        let canDrag = isLocalPlayerTurn || (gameMode == .multiplayer && !isLocalPlayerTurn)
+        // Allow on your own turn, or in multiplayer off-turn for hypothetical moves —
+        // but never on a finished board.
+        let canDrag = !isGameOver && (gameMode == .multiplayer || isLocalPlayerTurn)
         guard !isAnimatingAIMove, canDrag else { return }
         guard let placement = tentativeLetterAt(row: row, col: col) else { return }
         activeDragSource = .board(row: row, col: col)
@@ -458,7 +510,10 @@ class QuackleEngine {
             let committed = self.bridge.commitMove(moveString)
             if committed {
                 self.tentativePlacements = []
-                self.consecutiveScorelessTurns = 0
+                // Read the scoreless count back from the engine (authoritative; a
+                // 0-point place move still counts as scoreless there) instead of
+                // assuming a place move always resets it.
+                self.consecutiveScorelessTurns = Int(self.bridge.scorelessTurns())
                 self.refreshState()
                 switch self.gameMode {
                 case .multiplayer:
@@ -611,6 +666,9 @@ class QuackleEngine {
     // MARK: - History
 
     private func refreshMoveHistory() {
+        // Don't read _game->history() while the AI is mutating _game on bridgeQueue —
+        // show the last-known history instead (refreshed once the AI move lands).
+        guard !aiComputeInFlight else { return }
         let entries = bridge.moveHistory()
         moveHistory = entries.map { entry in
             MoveHistoryEntry(
@@ -722,17 +780,6 @@ class QuackleEngine {
 
     // MARK: - Text-based moves
 
-    func playMove(_ moveString: String) {
-        errorMessage = nil
-        let valid = bridge.commitMove(moveString)
-        if valid {
-            tentativePlacements = []
-            refreshState()
-            triggerAIIfNeeded()
-        } else {
-            errorMessage = "Invalid move: \(moveString)"
-        }
-    }
 
     func pass() {
         guard canCommitCurrentTurn else {
@@ -740,8 +787,8 @@ class QuackleEngine {
             return
         }
         tentativePlacements = []
-        consecutiveScorelessTurns += 1
         bridge.commitPass()
+        consecutiveScorelessTurns = Int(bridge.scorelessTurns())
         refreshState()
         switch gameMode {
         case .multiplayer:
@@ -757,8 +804,8 @@ class QuackleEngine {
             return
         }
         tentativePlacements = []
-        consecutiveScorelessTurns += 1
         bridge.commitExchange(withTiles: tiles)
+        consecutiveScorelessTurns = Int(bridge.scorelessTurns())
         refreshState()
         switch gameMode {
         case .multiplayer:
@@ -774,20 +821,25 @@ class QuackleEngine {
     var bingoKnowledge: Double { pow(skillLevel, log(0.10) / log(0.5)) }
 
     private func triggerAIIfNeeded() {
-        if !isHumanTurn && !isGameOver {
-            let bridge = self.bridge
-            let queue = self.bridgeQueue
-            let bingoKnowledge = self.bingoKnowledge
-            Task {
-                let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
-                    queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
-                }
-                if let result, result.moveType == 0,
-                   !result.placedTiles.isEmpty {
-                    self.animateAIMove(tiles: result.placedTiles)
-                } else {
-                    self.refreshState()
-                }
+        guard !isHumanTurn, !isGameOver, gameMode == .ai else { return }
+        let bridge = self.bridge
+        let queue = self.bridgeQueue
+        let bingoKnowledge = self.bingoKnowledge
+        let gen = aiGeneration
+        aiComputeInFlight = true
+        aiTriggerTask?.cancel()
+        aiTriggerTask = Task {
+            let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
+                queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
+            }
+            self.aiComputeInFlight = false
+            // Discard a stale result: a new game/restore (or cancellation) happened
+            // while the AI was thinking, so this move belongs to a game that's gone.
+            guard !Task.isCancelled, gen == self.aiGeneration else { return }
+            if let result, result.moveType == 0, !result.placedTiles.isEmpty {
+                self.animateAIMove(tiles: result.placedTiles)
+            } else {
+                self.refreshState()
             }
         }
     }
@@ -888,11 +940,15 @@ class QuackleEngine {
 
         if gameMode == .multiplayer {
             let numPlayers = Int(bridge.numberOfPlayers())
+            let over = bridge.isGameOver()
             var newPlayers: [PlayerModel] = []
             for i in 0..<numPlayers {
+                // At game over show the endgame-adjusted (deadwood) score, not raw.
+                let score = over ? Int(bridge.finalScore(forPlayerIndex: Int32(i)))
+                                 : Int(bridge.score(forPlayerIndex: Int32(i)))
                 newPlayers.append(PlayerModel(
                     name: bridge.name(forPlayerIndex: Int32(i)),
-                    score: Int(bridge.score(forPlayerIndex: Int32(i)))
+                    score: score
                 ))
             }
             players = newPlayers
@@ -927,11 +983,15 @@ class QuackleEngine {
             updateAvailableRack()
 
             let numPlayers = Int(bridge.numberOfPlayers())
+            let over = bridge.isGameOver()
             var newPlayers: [PlayerModel] = []
             for i in 0..<numPlayers {
+                // At game over show the endgame-adjusted (deadwood) score, not raw.
+                let score = over ? Int(bridge.finalScore(forPlayerIndex: Int32(i)))
+                                 : Int(bridge.score(forPlayerIndex: Int32(i)))
                 newPlayers.append(PlayerModel(
                     name: bridge.name(forPlayerIndex: Int32(i)),
-                    score: Int(bridge.score(forPlayerIndex: Int32(i)))
+                    score: score
                 ))
             }
             players = newPlayers
@@ -953,6 +1013,10 @@ class QuackleEngine {
 
     func saveGameState() {
         guard isInitialized, !board.isEmpty else { return }
+        // Don't read _game off the bridge queue's back: while the AI is computing/
+        // animating its move, the bridge is mutating _game on bridgeQueue. Skip the
+        // save (it will re-save after the AI move lands / on the next opportunity).
+        guard !aiComputeInFlight, !isAnimatingAIMove else { return }
 
         let savedBoard: [[SavedTile?]] = board.map { row in
             row.map { square in
@@ -963,12 +1027,17 @@ class QuackleEngine {
 
         var savedPlayers: [SavedPlayer] = []
         let numPlayers = Int(bridge.numberOfPlayers())
+        let over = bridge.isGameOver()
         for i in 0..<numPlayers {
             let rackLetters = bridge.rack(forPlayerIndex: Int32(i)) as [String]
+            // Persist the endgame-adjusted score at game over (the staged deadwood bonus
+            // can't be reconstructed after a restore).
+            let score = over ? Int(bridge.finalScore(forPlayerIndex: Int32(i)))
+                             : Int(bridge.score(forPlayerIndex: Int32(i)))
             savedPlayers.append(SavedPlayer(
                 name: bridge.name(forPlayerIndex: Int32(i)),
                 isHuman: bridge.name(forPlayerIndex: Int32(i)) != "AI",
-                score: Int(bridge.score(forPlayerIndex: Int32(i))),
+                score: score,
                 rack: rackLetters
             ))
         }
@@ -983,6 +1052,7 @@ class QuackleEngine {
             bag: savedBag,
             isGameOver: isGameOver,
             isHumanTurn: isHumanTurn,
+            scorelessTurns: Int(bridge.scorelessTurns()),
             moveHistory: moveHistory
         )
 
@@ -997,6 +1067,7 @@ class QuackleEngine {
             return false
         }
 
+        cancelAIWork()
         gameMode = .ai
         showModeSelection = false
         gameResultMessage = nil  // never show a stale multiplayer verdict on an AI game
@@ -1014,35 +1085,42 @@ class QuackleEngine {
         let scores = state.players.map { NSNumber(value: $0.score) }
         let racks = state.players.map { $0.rack }
 
-        bridge.restoreGame(
-            withHumanName: "You",
-            humanFirst: state.humanFirst,
-            aiMeanLoss: skillMeanLoss,
-            aiStdDev: skillStdDev,
-            boardLetters: boardLetters,
-            boardBlanks: boardBlanks,
-            playerScores: scores,
-            playerRacks: racks,
-            bagTiles: state.bag,
-            currentPlayerIsHuman: state.isHumanTurn
-        )
+        withBridgeSync {
+            self.bridge.restoreGame(
+                withHumanName: "You",
+                humanFirst: state.humanFirst,
+                aiMeanLoss: self.skillMeanLoss,
+                aiStdDev: self.skillStdDev,
+                boardLetters: boardLetters,
+                boardBlanks: boardBlanks,
+                playerScores: scores,
+                playerRacks: racks,
+                bagTiles: state.bag,
+                currentPlayerIsHuman: state.isHumanTurn,
+                scorelessTurns: Int32(state.scorelessTurns),
+                gameOver: state.isGameOver
+            )
+        }
 
         humanFirst = state.humanFirst
         moveHistory = state.moveHistory
+        consecutiveScorelessTurns = state.scorelessTurns
         tentativePlacements = []
         errorMessage = nil
         refreshState()
 
-        // Override gameOver from saved state (C++ may not detect it without history)
+        // C++ gameOver is now set via the restore param above; keep the Swift flag in sync.
         if state.isGameOver {
             isGameOver = true
         }
 
         // If it's the AI's turn, trigger AI play
         if !isHumanTurn && !isGameOver {
+            let gen = aiGeneration
             Task {
                 try? await Task.sleep(nanoseconds: 300_000_000)
-                triggerAIIfNeeded()
+                guard gen == self.aiGeneration else { return }  // a newer game started
+                self.triggerAIIfNeeded()
             }
         }
 
@@ -1071,7 +1149,11 @@ class QuackleEngine {
         player2GameCenterID: String,
         matchID: String
     ) {
-        bridge.startNewTwoHumanGame(withPlayer1: player1Name, player2: player2Name)
+        // Switching from an AI game (possibly mid-AI-think) — invalidate AI work and
+        // serialize the destructive bridge call behind any in-flight compute.
+        cancelAIWork()
+        resetTransientInteractionState()
+        withBridgeSync { self.bridge.startNewTwoHumanGame(withPlayer1: player1Name, player2: player2Name) }
         gameMode = .multiplayer
         showModeSelection = false
         self.localPlayerIndex = localPlayerIndex
@@ -1090,6 +1172,12 @@ class QuackleEngine {
     }
 
     func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int, matchID: String) {
+        // Switching from an AI game (possibly mid-AI-think) — invalidate AI work so the
+        // destructive restore below can't race an in-flight haveComputerPlay.
+        cancelAIWork()
+        // A reload (opponent move / cross-device sync) must not leave orphaned exchange/
+        // drag/blank-picker UI pointing at now-stale tiles.
+        resetTransientInteractionState()
         // Detect newly placed tiles by comparing incoming board with current board
         var newTiles: [AIAnimTile] = []
         let isOpponentMove = state.currentPlayerIndex == localPlayerIndex  // it's now our turn = opponent just moved
@@ -1127,19 +1215,21 @@ class QuackleEngine {
         let scores = state.playerScores.map { NSNumber(value: $0) }
         let racks = state.playerRacks
 
-        bridge.restoreTwoHumanGame(
-            withPlayer1: state.player1DisplayName,
-            player2: state.player2DisplayName,
-            boardLetters: boardLetters,
-            boardBlanks: boardBlanks,
-            playerScores: scores,
-            playerRacks: racks,
-            bagTiles: state.bag,
-            currentPlayerIndex: Int32(state.currentPlayerIndex),
-            currentTurnNumber: Int32(state.turnNumber),
-            scorelessTurns: Int32(state.consecutiveScorelessTurns),
-            gameOver: state.isGameOver
-        )
+        withBridgeSync {
+            self.bridge.restoreTwoHumanGame(
+                withPlayer1: state.player1DisplayName,
+                player2: state.player2DisplayName,
+                boardLetters: boardLetters,
+                boardBlanks: boardBlanks,
+                playerScores: scores,
+                playerRacks: racks,
+                bagTiles: state.bag,
+                currentPlayerIndex: Int32(state.currentPlayerIndex),
+                currentTurnNumber: Int32(state.turnNumber),
+                scorelessTurns: Int32(state.consecutiveScorelessTurns),
+                gameOver: state.isGameOver
+            )
+        }
 
         gameMode = .multiplayer
         showModeSelection = false
@@ -1198,10 +1288,16 @@ class QuackleEngine {
         }
 
         let numPlayers = Int(bridge.numberOfPlayers())
+        let over = bridge.isGameOver()
         var scores: [Int] = []
         var racks: [[String]] = []
         for i in 0..<numPlayers {
-            scores.append(Int(bridge.score(forPlayerIndex: Int32(i))))
+            // At game over capture the endgame-adjusted (deadwood) score NOW, while the
+            // bonus move is still staged — it can't be reconstructed after a restore.
+            // This is also what the won/lost/tie decision reads downstream.
+            let score = over ? Int(bridge.finalScore(forPlayerIndex: Int32(i)))
+                             : Int(bridge.score(forPlayerIndex: Int32(i)))
+            scores.append(score)
             racks.append(bridge.rack(forPlayerIndex: Int32(i)) as [String])
         }
 

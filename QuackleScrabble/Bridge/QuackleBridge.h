@@ -60,11 +60,19 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)isCurrentPlayerHuman;
 - (NSArray<NSString *> *)currentPlayerRack;
 - (int)scoreForPlayerIndex:(int)index;
+// Endgame-adjusted score: at game over, includes the unplayed-tiles (deadwood)
+// bonus/penalty that Quackle stages but does not fold into the raw score. Equals
+// the raw score when the game is not over. Use this for ALL terminal scoring
+// (final scoreboard, win/loss/tie). NOTE: the adjustment is only reconstructable
+// while the bonus move is still staged (i.e. right after the final commit, before
+// any restore) — capture/persist it at save/export time, not after a reload.
+- (int)finalScoreForPlayerIndex:(int)index;
 - (NSString *)nameForPlayerIndex:(int)index;
 - (int)numberOfPlayers;
 - (int)tilesRemainingInBag;
 - (BOOL)isGameOver;
 - (int)turnNumber;
+- (int)scorelessTurns;
 
 // Move operations
 // Convention: collection methods return empty arrays on error/no-data;
@@ -100,7 +108,9 @@ NS_ASSUME_NONNULL_BEGIN
                     playerScores:(NSArray<NSNumber *> *)scores
                      playerRacks:(NSArray<NSArray<NSString *> *> *)racks
                         bagTiles:(NSArray<NSString *> *)bag
-            currentPlayerIsHuman:(BOOL)humanTurn;
+            currentPlayerIsHuman:(BOOL)humanTurn
+                  scorelessTurns:(int)scorelessTurns
+                        gameOver:(BOOL)gameOver;
 
 // Multiplayer (two human players)
 - (void)startNewTwoHumanGameWithPlayer1:(NSString *)name1

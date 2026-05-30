@@ -70,6 +70,7 @@ struct SavedPlayer: Codable {
 }
 
 struct SavedGameState: Codable {
+    let version: Int
     let humanFirst: Bool
     let skillLevel: Double
     let board: [[SavedTile?]]
@@ -77,5 +78,43 @@ struct SavedGameState: Codable {
     let bag: [String]
     let isGameOver: Bool
     let isHumanTurn: Bool
+    /// Consecutive scoreless turns (for the six-scoreless game-end rule). Defaults to
+    /// 0 when decoding a payload from before this field existed.
+    let scorelessTurns: Int
     let moveHistory: [MoveHistoryEntry]
+
+    init(humanFirst: Bool, skillLevel: Double, board: [[SavedTile?]], players: [SavedPlayer],
+         bag: [String], isGameOver: Bool, isHumanTurn: Bool, scorelessTurns: Int = 0,
+         moveHistory: [MoveHistoryEntry], version: Int = 1) {
+        self.version = version
+        self.humanFirst = humanFirst
+        self.skillLevel = skillLevel
+        self.board = board
+        self.players = players
+        self.bag = bag
+        self.isGameOver = isGameOver
+        self.isHumanTurn = isHumanTurn
+        self.scorelessTurns = scorelessTurns
+        self.moveHistory = moveHistory
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version, humanFirst, skillLevel, board, players, bag, isGameOver, isHumanTurn, scorelessTurns, moveHistory
+    }
+
+    // Custom decoder: tolerate older saves that lack newer fields (decodeIfPresent +
+    // defaults) so a schema addition never silently discards an in-progress AI game.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        humanFirst = try c.decode(Bool.self, forKey: .humanFirst)
+        skillLevel = try c.decode(Double.self, forKey: .skillLevel)
+        board = try c.decode([[SavedTile?]].self, forKey: .board)
+        players = try c.decode([SavedPlayer].self, forKey: .players)
+        bag = try c.decode([String].self, forKey: .bag)
+        isGameOver = try c.decode(Bool.self, forKey: .isGameOver)
+        isHumanTurn = try c.decode(Bool.self, forKey: .isHumanTurn)
+        scorelessTurns = try c.decodeIfPresent(Int.self, forKey: .scorelessTurns) ?? 0
+        moveHistory = try c.decode([MoveHistoryEntry].self, forKey: .moveHistory)
+    }
 }

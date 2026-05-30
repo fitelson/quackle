@@ -19,7 +19,7 @@ settings:
 targets:
   QuackleScrabbleTests:
     type: bundle.unit-test
-    supportedDestinations: [iOS]
+    supportedDestinations: [iOS, macOS]
     sources:
       - path: QuackleScrabbleTests
     dependencies:

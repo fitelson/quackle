@@ -25,14 +25,18 @@
 
 using namespace Quackle;
 
-// Helper: UVString to NSString
+// Helper: UVString to NSString. stringWithUTF8String: returns nil on invalid UTF-8;
+// never hand nil back (callers insert into NSArrays / honor a nonnull contract).
 static NSString *uvToNS(const UVString &s) {
-    return [NSString stringWithUTF8String:s.c_str()];
+    NSString *r = [NSString stringWithUTF8String:s.c_str()];
+    return r ?: @"";
 }
 
-// Helper: NSString to std::string
+// Helper: NSString to std::string. -[NSString UTF8String] can return NULL; guard it
+// (std::string(NULL) is undefined behavior).
 static std::string nsToStd(NSString *s) {
-    return std::string([s UTF8String]);
+    const char *c = s.UTF8String;
+    return c ? std::string(c) : std::string();
 }
 
 @implementation QBTileInfo
@@ -228,6 +232,31 @@ static std::string nsToStd(NSString *s) {
     return _game->currentPosition().players()[index].score();
 }
 
+- (int)finalScoreForPlayerIndex:(int)index {
+    if (!_game || !_game->hasPositions()) return 0;
+    try {
+        const GamePosition &pos = _game->currentPosition();
+        if (index < 0 || index >= (int)pos.players().size()) return 0;
+        // endgameAdjustedScores() UNCONDITIONALLY adds m_moveMade.effectiveScore() to
+        // the current player when gameOver(). That is only correct on a LIVE game over,
+        // where the staged move is the real UnusedTilesBonus. After a RESTORE the staged
+        // move is a Nonmove (effectiveScore -9999) — and we already persisted the
+        // adjusted score into the raw score at save/export time — so trust the
+        // adjustment ONLY for a genuine unused-tiles bonus; otherwise return raw.
+        if (pos.gameOver() && pos.moveMade().action != Move::UnusedTilesBonus) {
+            return pos.players()[index].score();
+        }
+        PlayerList adjusted = pos.endgameAdjustedScores();
+        if (index < 0 || index >= (int)adjusted.size()) return 0;
+        return adjusted[index].score();
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in finalScoreForPlayerIndex: %s", e.what());
+        return [self scoreForPlayerIndex:index];
+    } catch (...) {
+        return [self scoreForPlayerIndex:index];
+    }
+}
+
 - (NSString *)nameForPlayerIndex:(int)index {
     if (!_game || !_game->hasPositions()) return @"";
     if (index < 0 || index >= (int)_game->currentPosition().players().size()) return @"";
@@ -252,6 +281,11 @@ static std::string nsToStd(NSString *s) {
 - (int)turnNumber {
     if (!_game || !_game->hasPositions()) return 0;
     return _game->currentPosition().turnNumber();
+}
+
+- (int)scorelessTurns {
+    if (!_game || !_game->hasPositions()) return 0;
+    return _game->currentPosition().scorelessTurnsInARow();
 }
 
 #pragma mark - Move Operations
@@ -391,13 +425,31 @@ static std::string nsToStd(NSString *s) {
 
 - (void)commitPass {
     if (!_game || !_game->hasPositions()) return;
-    _game->commitMove(Move::createPassMove());
+    try {
+        _game->commitMove(Move::createPassMove());
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in commitPass: %s", e.what());
+    } catch (...) {
+        NSLog(@"QuackleBridge: Unknown C++ exception in commitPass");
+    }
 }
 
 - (void)commitExchangeWithTiles:(NSString *)tiles {
     if (!_game || !_game->hasPositions()) return;
-    LetterString encodedTiles = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(nsToStd(tiles)));
-    _game->commitMove(Move::createExchangeMove(encodedTiles, false));
+    try {
+        // Rules: cannot exchange unless at least a full rack (7) remains in the bag.
+        static const int kFullRack = 7;
+        if ((int)_game->currentPosition().bag().size() < kFullRack) {
+            NSLog(@"QuackleBridge: refusing exchange — fewer than a full rack in the bag");
+            return;
+        }
+        LetterString encodedTiles = QUACKLE_ALPHABET_PARAMETERS->encode(MARK_UV(nsToStd(tiles)));
+        _game->commitMove(Move::createExchangeMove(encodedTiles, false));
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in commitExchangeWithTiles: %s", e.what());
+    } catch (...) {
+        NSLog(@"QuackleBridge: Unknown C++ exception in commitExchangeWithTiles");
+    }
 }
 
 #pragma mark - AI Play
@@ -405,6 +457,11 @@ static std::string nsToStd(NSString *s) {
 - (nullable QBMoveInfo *)haveComputerPlayWithBingoKnowledge:(double)bingoKnowledge {
     if (!_game || !_game->hasPositions()) return nil;
     if (_game->currentPosition().gameOver()) return nil;
+    // Never let the engine play on a human's behalf. computerPlayer(id) falls back
+    // to a default StaticPlayer when the current id has no computer player, so guard
+    // on the player TYPE — a stale/double trigger that fires after the turn returned
+    // to the human must be a no-op, not a move committed for them.
+    if (_game->currentPosition().currentPlayer().type() != Player::ComputerPlayerType) return nil;
 
     try {
         // Get computer player
@@ -647,7 +704,9 @@ static std::string nsToStd(NSString *s) {
                     playerScores:(NSArray<NSNumber *> *)scores
                      playerRacks:(NSArray<NSArray<NSString *> *> *)racks
                         bagTiles:(NSArray<NSString *> *)bagTileLetters
-            currentPlayerIsHuman:(BOOL)humanTurn {
+            currentPlayerIsHuman:(BOOL)humanTurn
+                  scorelessTurns:(int)scorelessTurns
+                        gameOver:(BOOL)gameOver {
     try {
         delete _game;
         _game = new Game;
@@ -683,6 +742,11 @@ static std::string nsToStd(NSString *s) {
         int rows = (int)boardLetters.count;
         for (int row = 0; row < rows; ++row) {
             NSArray<NSString *> *rowLetters = boardLetters[row];
+            // Guard the OUTER index too: corrupted/mismatched GameKit data can give
+            // boardBlanks fewer rows than boardLetters, and an out-of-bounds NSArray
+            // subscript throws NSRangeException (which the C++ catch(...) won't reliably
+            // catch → abort).
+            if (row >= (int)boardBlanks.count) continue;
             NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
             if (![rowLetters isKindOfClass:[NSArray class]]) continue;
             int cols = (int)rowLetters.count;
@@ -736,10 +800,15 @@ static std::string nsToStd(NSString *s) {
         int humanId = humanFirst ? 0 : 1;
         int aiId = humanFirst ? 1 : 0;
         _game->currentPosition().setCurrentPlayer(humanTurn ? humanId : aiId);
+        // Symmetric with the two-human restore: restore the scoreless-turn count and
+        // game-over flag so the C++ position matches the Swift model (otherwise the
+        // six-scoreless rule resets to 0 and gameOver() lies after an AI-game reload).
+        _game->currentPosition().setScorelessTurnsInARow(scorelessTurns);
+        _game->currentPosition().setGameOver(gameOver);
 
-        NSLog(@"QuackleBridge: Game restored — %@ vs AI, bag=%d tiles, %@ to play",
+        NSLog(@"QuackleBridge: Game restored — %@ vs AI, bag=%d tiles, %@ to play, scoreless=%d, gameOver=%@",
               name, (int)_game->currentPosition().bag().size(),
-              humanTurn ? name : @"AI");
+              humanTurn ? name : @"AI", scorelessTurns, gameOver ? @"YES" : @"NO");
     } catch (const std::exception &e) {
         NSLog(@"QuackleBridge: C++ exception in restoreGame: %s", e.what());
     } catch (...) {
@@ -807,6 +876,11 @@ static std::string nsToStd(NSString *s) {
         int rows = (int)boardLetters.count;
         for (int row = 0; row < rows; ++row) {
             NSArray<NSString *> *rowLetters = boardLetters[row];
+            // Guard the OUTER index too: corrupted/mismatched GameKit data can give
+            // boardBlanks fewer rows than boardLetters, and an out-of-bounds NSArray
+            // subscript throws NSRangeException (which the C++ catch(...) won't reliably
+            // catch → abort).
+            if (row >= (int)boardBlanks.count) continue;
             NSArray<NSNumber *> *rowBlanks = boardBlanks[row];
             if (![rowLetters isKindOfClass:[NSArray class]]) continue;
             int cols = (int)rowLetters.count;

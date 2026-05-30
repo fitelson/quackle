@@ -21,7 +21,6 @@ struct OpponentRackView: View {
                 Color.clear.onAppear {
                     let frame = geo.frame(in: .named("game"))
                     engine.opponentRackOrigin = CGPoint(x: frame.midX, y: frame.midY)
-                    engine.opponentTileSize = 44
                 }
                 .onChange(of: geo.size) {
                     let frame = geo.frame(in: .named("game"))

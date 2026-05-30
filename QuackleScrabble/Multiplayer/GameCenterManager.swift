@@ -501,19 +501,28 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             return
         }
 
-        // Update display names and IDs from resolved match participants
+        // Update display names and IDs from resolved match participants.
+        // Two-pass so an empty stored player2 ID can't steal player1's participant:
+        // pass 1 binds exact ID matches; pass 2 fills a still-empty player2 slot from
+        // the single remaining unassigned participant.
         var s = state
-        var matchedPlayer1 = false
-        var matchedPlayer2 = false
-        for p in match.participants {
-            guard let player = p.player else { continue }
-            if !matchedPlayer1 && player.gamePlayerID == s.player1GameCenterID {
-                matchedPlayer1 = true
+        let resolved = match.participants.compactMap { $0.player }
+        var usedIDs = Set<String>()
+        // Pass 1: exact matches.
+        for player in resolved {
+            if player.gamePlayerID == s.player1GameCenterID {
                 s.player1DisplayName = player.displayName
-            } else if !matchedPlayer2 && (player.gamePlayerID == s.player2GameCenterID || s.player2GameCenterID.isEmpty) {
-                matchedPlayer2 = true
-                s.player2GameCenterID = player.gamePlayerID
+                usedIDs.insert(player.gamePlayerID)
+            } else if !s.player2GameCenterID.isEmpty && player.gamePlayerID == s.player2GameCenterID {
                 s.player2DisplayName = player.displayName
+                usedIDs.insert(player.gamePlayerID)
+            }
+        }
+        // Pass 2: fill an empty player2 from the one leftover participant.
+        if s.player2GameCenterID.isEmpty {
+            if let leftover = resolved.first(where: { !usedIDs.contains($0.gamePlayerID) && $0.gamePlayerID != s.player1GameCenterID }) {
+                s.player2GameCenterID = leftover.gamePlayerID
+                s.player2DisplayName = leftover.displayName
             }
         }
 
@@ -650,23 +659,28 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                     return
                 }
                 self.currentMatch = match
-                // A terminal end-match that already landed leaves the match .ended.
-                if pendingTurn.terminal != nil, match.status == .ended {
-                    print("[GameCenter] pending terminal already applied (match ended); clearing")
-                    self.pendingTurn = nil
-                    self.sharedActiveMatchID = nil
+                if let terminal = pendingTurn.terminal {
+                    // Terminal end: the ONLY success is status == .ended. If the turn
+                    // advanced but the match is still open, the end didn't land — keep
+                    // the pending so it retries; do NOT drop the outcome.
+                    if match.status == .ended {
+                        print("[GameCenter] pending terminal already applied (match ended); clearing")
+                        self.pendingTurn = nil
+                        self.sharedActiveMatchID = nil
+                    } else if match.currentParticipant?.player?.gamePlayerID == self.localPlayerID {
+                        self.runTerminalEnd(matchData: pendingTurn.data, terminal: terminal)
+                    } else {
+                        print("[GameCenter] pending terminal: turn advanced but match still open — keeping for retry")
+                    }
                     return
                 }
+                // Non-terminal turn: if the turn already advanced, our move landed.
                 if match.currentParticipant?.player?.gamePlayerID != self.localPlayerID {
                     print("[GameCenter] pending turn already submitted or no longer local turn; clearing")
                     self.pendingTurn = nil
                     return
                 }
-                if let terminal = pendingTurn.terminal {
-                    self.runTerminalEnd(matchData: pendingTurn.data, terminal: terminal)
-                } else {
-                    self.submitTurn(matchData: pendingTurn.data)
-                }
+                self.submitTurn(matchData: pendingTurn.data)
             } catch {
                 print("[GameCenter] retryPendingTurn failed: \(error.localizedDescription)")
             }
@@ -713,14 +727,15 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         self.finishTerminalSuccess()
                         return
                     }
-                    // Must be our turn to end in-turn.
+                    // Must be our turn to end in-turn. If the turn advanced while the
+                    // match is still open (e.g. opponent timeout) our terminal end did
+                    // NOT land — do NOT treat this as success (that would strand the
+                    // opponent on a never-ended match with no outcomes written). Keep
+                    // pendingTurn/currentMatch and surface the anomaly; a later
+                    // retryPendingTurn (or the opponent's own end) resolves it.
                     guard fresh.currentParticipant?.player?.gamePlayerID == self.localPlayerID else {
-                        // Turn advanced elsewhere (e.g. opponent timeout) before our
-                        // end landed — the queued terminal data is stale. Tear down the
-                        // match refs so we don't poll/point at a concluded match; the
-                        // local board already shows GAME OVER + the result message.
-                        print("[GameCenter] endMatch attempt \(attempt): not local turn; clearing pending terminal")
-                        self.finishTerminalSuccess()
+                        print("[GameCenter] endMatch attempt \(attempt): turn advanced but match still open — keeping pending terminal")
+                        self.engine?.errorMessage = "Couldn't finalize the game end yet — it will retry."
                         return
                     }
                     self.applyOutcomes(terminal, to: fresh)
@@ -820,6 +835,10 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                 self.pendingTurn = nil
                 self.sharedActiveMatchID = nil
                 self.isWaitingForOpponent = false
+                // Don't leave the engine in .multiplayer with a nil match (poll keys off
+                // gameMode); route to mode selection in a clean, non-game-over state.
+                self.engine?.isGameOver = false
+                self.engine?.gameResultMessage = nil
                 self.engine?.showModeSelection = true
             } catch {
                 print("[GameCenter] forfeit FAILED: \(error.localizedDescription)")
@@ -877,7 +896,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
                 // Check if opponent quit (participant outcome)
                 let opponentQuit = refreshed.participants.contains { p in
-                    p.player?.gamePlayerID != self.localPlayerID && p.matchOutcome == .quit
+                    p.player != nil && p.player?.gamePlayerID != self.localPlayerID && p.matchOutcome == .quit
                 }
                 if opponentQuit {
                     print("[GameCenter] poll: opponent has quit")
@@ -1005,7 +1024,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
     private func handleMatchEnded(_ match: GKTurnBasedMatch) {
         let opponentQuit = match.participants.contains { p in
-            p.player?.gamePlayerID != self.localPlayerID && p.matchOutcome == .quit
+            p.player != nil && p.player?.gamePlayerID != self.localPlayerID && p.matchOutcome == .quit
         }
         print("[GameCenter] match ended (status=\(match.status.rawValue), opponentQuit=\(opponentQuit))")
 

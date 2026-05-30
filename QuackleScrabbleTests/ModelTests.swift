@@ -100,6 +100,56 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(decoded.isGameOver)
         XCTAssertTrue(decoded.isHumanTurn)
         XCTAssertEqual(decoded.moveHistory.count, 2)
+        XCTAssertEqual(decoded.scorelessTurns, 0)  // default
+        XCTAssertEqual(decoded.version, 1)
+    }
+
+    func testSavedGameStateRoundtripsScorelessTurns() throws {
+        let state = SavedGameState(
+            humanFirst: false, skillLevel: 0.5, board: [], players: [],
+            bag: [], isGameOver: true, isHumanTurn: false, scorelessTurns: 4, moveHistory: []
+        )
+        let data = try JSONEncoder().encode(state)
+        let decoded = try JSONDecoder().decode(SavedGameState.self, from: data)
+        XCTAssertEqual(decoded.scorelessTurns, 4)
+        XCTAssertTrue(decoded.isGameOver)
+    }
+
+    func testSavedGameStateLegacyDecodeMissingFields() throws {
+        // A payload from before `version`/`scorelessTurns` existed must still decode,
+        // defaulting the new fields rather than silently discarding the saved game.
+        let payload: [String: Any] = [
+            "humanFirst": true,
+            "skillLevel": 0.5,
+            "board": [],
+            "players": [],
+            "bag": ["A"],
+            "isGameOver": false,
+            "isHumanTurn": true,
+            "moveHistory": []
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(SavedGameState.self, from: data)
+        XCTAssertEqual(decoded.version, 1)
+        XCTAssertEqual(decoded.scorelessTurns, 0)
+        XCTAssertEqual(decoded.bag, ["A"])
+    }
+
+    func testMoveHistoryEntryLegacyDecodeMissingPlayerIndex() throws {
+        // Pre-playerIndex entries must decode with playerIndex defaulting to -1.
+        let payload: [String: Any] = [
+            "id": UUID().uuidString,
+            "turn": 2,
+            "playerName": "You",
+            "moveDescription": "8H CAT",
+            "score": 10,
+            "totalScore": 30
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(MoveHistoryEntry.self, from: data)
+        XCTAssertEqual(decoded.playerIndex, -1)
+        XCTAssertEqual(decoded.turn, 2)
+        XCTAssertEqual(decoded.playerName, "You")
     }
 
     // MARK: - MoveHistoryEntry
