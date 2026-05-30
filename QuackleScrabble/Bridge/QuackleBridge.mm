@@ -51,15 +51,15 @@ static std::string nsToStd(NSString *s) {
 // Deterministic (no per-turn randomness) and nested (raising the slider only adds words).
 // Blanks are scored as the letter they represent.
 //
-// kBingoQuantile[i] = the (5*i)th percentile of lnDrawCount over the 20,362 drawable
-// 7-letter words in /usr/share/dict/words (a proxy for CSW19 — the percentile shapes are
-// close; words needing a blank to draw are excluded). Regenerate with tools/bingo_calib.py
-// if the lexicon changes. Sanity check: REGIONS (ln 12.83) lands at ~the 98th percentile
-// here, matching its real top-2% bingo rank.
+// kBingoQuantile[i] = the (5*i)th percentile of lnDrawCount over the 33,839 drawable
+// 7-letter words in the actual CSW19 lexicon (extracted by walking the bundled
+// data/lexica/csw19.dawg; words needing a blank to draw are excluded). Regenerate with
+// tools/bingo_calib.py if the lexicon changes. Sanity check: REGIONS (ln 12.83) lands at
+// the ~98.4th percentile, matching its real top-2% bingo rank.
 static const double kBingoQuantile[21] = {
-     3.1781,  7.6089,  8.2657,  8.7765,  9.1129,  9.3643,  9.6238,  9.8526,  9.9704,
-    10.2273, 10.3451, 10.6328, 10.7506, 10.9512, 11.0382, 11.3259, 11.4437, 11.7314,
-    12.0191, 12.4245, 14.3341
+     1.3863,  7.6779,  8.2657,  8.7232,  9.0766,  9.2828,  9.5649,  9.8218,  9.9396,
+    10.2273, 10.3451, 10.5682, 10.6635, 10.9205, 11.0382, 11.2614, 11.4437, 11.7032,
+    11.9545, 12.3600, 14.3341
 };
 
 // lnDrawCount at the p-th percentile (p in [0,1]); linear interp over the 5%-spaced grid.
