@@ -6,7 +6,7 @@ import SwiftUI
 extension QuackleBridge: @unchecked Sendable {}
 
 enum ActiveSheet: Identifiable {
-    case blankPicker, topMoves, history, skillSlider
+    case blankPicker, topMoves, history, skillSlider, pastGames
     var id: Self { self }
 }
 
@@ -119,6 +119,13 @@ class QuackleEngine {
     var onMultiplayerMoveCommitted: (() -> Void)?
     /// Win/loss/tie message shown when a multiplayer game ends (nil otherwise).
     var gameResultMessage: String?
+
+    /// Finished-game archive (set by the app). Recorded once per game when it ends.
+    var historyStore: GameHistoryStore?
+    /// Guards recordGameOverIfNeeded() so a game is archived exactly once — set true when
+    /// a game ends (or when an already-over game is loaded, so reloads don't re-record),
+    /// reset false when a fresh game starts.
+    private var hasRecordedGameOver = false
 
 
     var isLocalPlayerTurn: Bool = true
@@ -289,6 +296,7 @@ class QuackleEngine {
         aiAnimTiles = []
         aiAnimPhase = 0
         consecutiveScorelessTurns = 0
+        hasRecordedGameOver = false  // fresh game → its eventual game-over will be archived
         // NOTE: Do NOT clear onMultiplayerMoveCommitted here — it must survive
         // across game mode switches so multiplayer moves always get submitted.
         refreshState()
@@ -1047,6 +1055,46 @@ class QuackleEngine {
             // Auto-save after each state change (AI mode only)
             saveGameState()
         }
+
+        // Archive the game to history the first time it's seen as over (both modes).
+        recordGameOverIfNeeded()
+    }
+
+    /// Record the finished game to the history archive exactly once. Uses the
+    /// endgame-adjusted scores already in `players` (refreshState reads finalScore when
+    /// over). For online, dedups across the user's devices by matchID; AI games get a UUID.
+    private func recordGameOverIfNeeded() {
+        guard isGameOver, players.count == 2, let store = historyStore else { return }
+        let isOnline = (gameMode == .multiplayer)
+        // Online games dedup by the stable matchID — so the opponent ENDING the game still
+        // archives it on this device the first time we see it over, while reloads and the
+        // user's other devices don't duplicate it. AI games have no stable id, so a
+        // once-per-session flag prevents re-archiving on reload instead.
+        if isOnline {
+            guard !multiplayerMatchID.isEmpty, !store.contains(multiplayerMatchID) else { return }
+        } else {
+            guard !hasRecordedGameOver else { return }
+            hasRecordedGameOver = true
+        }
+        let localIdx = isOnline ? localPlayerIndex : (humanFirst ? 0 : 1)
+        let oppIdx = localIdx == 0 ? 1 : 0
+        guard localIdx < players.count, oppIdx < players.count else { return }
+        let local = players[localIdx]
+        let opp = players[oppIdx]
+        let recordID = isOnline ? multiplayerMatchID : UUID().uuidString
+        let record = GameRecord(
+            id: recordID,
+            date: Date(),
+            isOnline: isOnline,
+            localName: local.name,
+            opponentName: opp.name,
+            localScore: local.score,
+            opponentScore: opp.score,
+            board: GameRecord.encodeBoard(board),
+            cols: board.first?.count ?? 0
+        )
+        store.record(record)
+        print("[QuackleEngine] Archived finished game: \(local.name) \(local.score)–\(opp.score) \(opp.name) [\(record.result.rawValue)]")
     }
 
     // MARK: - Save/Restore
@@ -1182,6 +1230,9 @@ class QuackleEngine {
         consecutiveScorelessTurns = state.scorelessTurns
         tentativePlacements = []
         errorMessage = nil
+        // Reloading an already-finished game must NOT re-archive it; a still-live game
+        // will archive when it actually ends.
+        hasRecordedGameOver = state.isGameOver
         refreshState()
 
         // C++ gameOver is now set via the restore param above; keep the Swift flag in sync.
@@ -1243,6 +1294,7 @@ class QuackleEngine {
         isAnimatingAIMove = false
         aiAnimTiles = []
         aiAnimPhase = 0
+        hasRecordedGameOver = false  // fresh online game
         refreshState()
     }
 

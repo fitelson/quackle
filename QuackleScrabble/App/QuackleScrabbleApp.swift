@@ -4,6 +4,7 @@ import SwiftUI
 struct QuackleScrabbleApp: App {
     @State private var engine = QuackleEngine()
     @State private var gameCenterManager = GameCenterManager()
+    @State private var historyStore = GameHistoryStore()
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -11,8 +12,10 @@ struct QuackleScrabbleApp: App {
             ContentView()
                 .environment(engine)
                 .environment(gameCenterManager)
+                .environment(historyStore)
                 .onAppear {
                     gameCenterManager.engine = engine
+                    engine.historyStore = historyStore
                     gameCenterManager.authenticate()
                     engine.initialize()
                 }

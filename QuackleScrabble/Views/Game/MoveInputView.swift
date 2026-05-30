@@ -53,6 +53,9 @@ struct MoveInputView: View {
                             gameCenterManager.findOrCreateMatch()
                         }
                     }
+                    Button("Game History") {
+                        engine.activeSheet = .pastGames
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 15))

@@ -360,4 +360,54 @@ final class ModelTests: XCTestCase {
         let decoded = try JSONDecoder().decode(MultiplayerGameState.self, from: data)
         XCTAssertEqual(decoded.turnNumber, 1)
     }
+
+    // MARK: - GameRecord (game history)
+
+    func testGameRecordCodableRoundtrip() throws {
+        let rec = GameRecord(id: "m1", date: Date(timeIntervalSince1970: 1_700_000_000),
+                             isOnline: true, localName: "fitelson", opponentName: "Tina",
+                             localScore: 321, opponentScore: 288, board: "A.b", cols: 3)
+        let data = try JSONEncoder().encode(rec)
+        let decoded = try JSONDecoder().decode(GameRecord.self, from: data)
+        XCTAssertEqual(decoded.id, "m1")
+        XCTAssertEqual(decoded.isOnline, true)
+        XCTAssertEqual(decoded.localScore, 321)
+        XCTAssertEqual(decoded.opponentScore, 288)
+        XCTAssertEqual(decoded.result, .won)
+    }
+
+    func testGameRecordResult() {
+        func r(_ a: Int, _ b: Int) -> GameRecord.Result {
+            GameRecord(id: "x", date: Date(), isOnline: false, localName: "You", opponentName: "AI",
+                       localScore: a, opponentScore: b, board: "", cols: 0).result
+        }
+        XCTAssertEqual(r(10, 5), .won)
+        XCTAssertEqual(r(5, 10), .lost)
+        XCTAssertEqual(r(7, 7), .tied)
+    }
+
+    func testGameRecordBoardEncodeDecodeRoundtrip() {
+        // 2x3 board: A (tile), empty, e (blank-E); empty, B, empty
+        let board: [[SquareModel]] = [
+            [SquareModel(letter: "A", isBlank: false, bonus: .none),
+             SquareModel(letter: nil, isBlank: false, bonus: .none),
+             SquareModel(letter: "E", isBlank: true,  bonus: .none)],
+            [SquareModel(letter: nil, isBlank: false, bonus: .none),
+             SquareModel(letter: "B", isBlank: false, bonus: .none),
+             SquareModel(letter: nil, isBlank: false, bonus: .none)],
+        ]
+        let encoded = GameRecord.encodeBoard(board)
+        XCTAssertEqual(encoded, "A.e.B.")   // '.'=empty, lowercase=blank
+        let rec = GameRecord(id: "x", date: Date(), isOnline: false, localName: "You",
+                             opponentName: "AI", localScore: 0, opponentScore: 0,
+                             board: encoded, cols: 3)
+        let grid = rec.boardGrid()
+        XCTAssertEqual(grid.count, 2)
+        XCTAssertEqual(grid[0][0]?.letter, "A")
+        XCTAssertEqual(grid[0][0]?.isBlank, false)
+        XCTAssertNil(grid[0][1] ?? nil)
+        XCTAssertEqual(grid[0][2]?.letter, "E")
+        XCTAssertEqual(grid[0][2]?.isBlank, true)
+        XCTAssertEqual(grid[1][1]?.letter, "B")
+    }
 }

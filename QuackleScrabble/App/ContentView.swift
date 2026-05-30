@@ -5,6 +5,8 @@ struct ContentView: View {
 
     @Environment(GameCenterManager.self) var gameCenterManager
 
+    @Environment(GameHistoryStore.self) var historyStore
+
     var body: some View {
         Group {
             if !engine.isInitialized {
@@ -44,6 +46,7 @@ struct ContentView: View {
 struct GameView: View {
     @Environment(QuackleEngine.self) var engine
     @Environment(GameCenterManager.self) var gameCenterManager
+    @Environment(GameHistoryStore.self) var historyStore
     var body: some View {
         @Bindable var engine = engine
 
@@ -189,6 +192,12 @@ struct GameView: View {
                     .environment(engine)
                     #if os(iOS)
                     .presentationDetents([.height(460)])
+                    #endif
+            case .pastGames:
+                GameHistoryView()
+                    .environment(historyStore)
+                    #if os(iOS)
+                    .presentationDetents([.large])
                     #endif
             }
         }
@@ -494,5 +503,151 @@ struct WaitingForOpponentView: View {
                 gameCenterManager.pollForMatchUpdate()
             }
         }
+    }
+}
+
+// MARK: - Game History (finished-game archive)
+
+private let gameHistoryDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.dateStyle = .medium
+    f.timeStyle = .short
+    return f
+}()
+
+struct GameHistoryView: View {
+    @Environment(GameHistoryStore.self) var store
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if store.games.isEmpty {
+                    ContentUnavailableView(
+                        "No Games Yet",
+                        systemImage: "clock.arrow.circlepath",
+                        description: Text("Finished games — online and vs the AI — will be recorded here.")
+                    )
+                } else {
+                    List {
+                        ForEach(store.games) { game in
+                            NavigationLink {
+                                GameHistoryDetailView(game: game)
+                            } label: {
+                                GameHistoryRow(game: game)
+                            }
+                        }
+                        .onDelete { offsets in
+                            offsets.map { store.games[$0] }.forEach { store.delete($0) }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Game History")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(width: 500, height: 700)
+        #endif
+    }
+}
+
+struct GameHistoryRow: View {
+    let game: GameRecord
+
+    private var resultColor: Color {
+        switch game.result {
+        case .won: return .green
+        case .lost: return .red
+        case .tied: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("vs \(game.opponentName)")
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
+                Text("\(game.isOnline ? "Online" : "AI") · \(gameHistoryDateFormatter.string(from: game.date))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("\(game.localScore) – \(game.opponentScore)")
+                    .font(.system(size: 16, weight: .semibold))
+                    .monospacedDigit()
+                Text(game.result.rawValue)
+                    .font(.caption.weight(.bold))
+                    .foregroundColor(resultColor)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+struct GameHistoryDetailView: View {
+    let game: GameRecord
+
+    var body: some View {
+        let grid = game.boardGrid()
+        VStack(spacing: 10) {
+            Text("\(game.localName)  \(game.localScore) – \(game.opponentScore)  \(game.opponentName)")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("\(game.result.rawValue) · \(game.isOnline ? "Online" : "vs AI") · \(gameHistoryDateFormatter.string(from: game.date))")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if grid.isEmpty {
+                Spacer()
+                Text("No board recorded for this game.")
+                    .foregroundColor(.secondary)
+                Spacer()
+            } else {
+                GeometryReader { geo in
+                    let cols = max(grid.map { $0.count }.max() ?? 15, 1)
+                    let side = floor(min(geo.size.width, geo.size.height))
+                    let cell = floor(side / CGFloat(cols))
+                    VStack(spacing: 1) {
+                        ForEach(grid.indices, id: \.self) { r in
+                            HStack(spacing: 1) {
+                                ForEach(grid[r].indices, id: \.self) { c in
+                                    let tile = grid[r][c]
+                                    ZStack {
+                                        Rectangle()
+                                            .fill(tile == nil
+                                                  ? Color.gray.opacity(0.15)
+                                                  : Color(red: 0.96, green: 0.93, blue: 0.82))
+                                        if let tile {
+                                            Text(tile.letter)
+                                                .font(.system(size: cell * 0.58, weight: .bold))
+                                                .foregroundColor(tile.isBlank ? .red : .black)
+                                        }
+                                    }
+                                    .frame(width: cell, height: cell)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                }
+                .aspectRatio(1, contentMode: .fit)
+            }
+        }
+        .padding()
+        .navigationTitle("Final Board")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 }

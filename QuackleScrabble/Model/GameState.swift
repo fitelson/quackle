@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 struct TilePlacement: Equatable {
     let row: Int
@@ -128,5 +129,138 @@ struct SavedGameState: Codable {
         scorelessTurns = try c.decodeIfPresent(Int.self, forKey: .scorelessTurns) ?? 0
         turnNumber = try c.decodeIfPresent(Int.self, forKey: .turnNumber) ?? 1
         moveHistory = try c.decode([MoveHistoryEntry].self, forKey: .moveHistory)
+    }
+}
+
+// MARK: - Game History (finished-game archive)
+
+/// One finished game: a compact summary plus the final-board snapshot. Stored per-user
+/// and synced across that user's own devices via iCloud KVS (see GameHistoryStore).
+struct GameRecord: Codable, Identifiable {
+    enum Result: String, Codable { case won = "Won", lost = "Lost", tied = "Tie" }
+
+    /// Stable per game: the GKTurnBasedMatch matchID for online games (so the same game
+    /// dedups across a user's devices), a fresh UUID for AI games.
+    let id: String
+    let date: Date
+    let isOnline: Bool
+    let localName: String
+    let opponentName: String
+    let localScore: Int
+    let opponentScore: Int
+    /// Row-major final board: '.' = empty, 'A'–'Z' = a tile, 'a'–'z' = a blank played as
+    /// that letter. `cols` is the row width for decoding.
+    let board: String
+    let cols: Int
+
+    var result: Result {
+        if localScore > opponentScore { return .won }
+        if localScore < opponentScore { return .lost }
+        return .tied
+    }
+
+    /// Decode the compact board into a grid; nil = empty cell.
+    func boardGrid() -> [[(letter: String, isBlank: Bool)?]] {
+        guard cols > 0 else { return [] }
+        var grid: [[(letter: String, isBlank: Bool)?]] = []
+        var row: [(letter: String, isBlank: Bool)?] = []
+        for ch in board {
+            if ch == "." {
+                row.append(nil)
+            } else {
+                row.append((String(ch).uppercased(), ch.isLowercase))
+            }
+            if row.count == cols { grid.append(row); row = [] }
+        }
+        if !row.isEmpty { grid.append(row) }
+        return grid
+    }
+
+    /// Compact-encode the engine's board model. Empty/"." cells → '.'; blanks → lowercase.
+    static func encodeBoard(_ board: [[SquareModel]]) -> String {
+        var s = ""
+        for row in board {
+            for sq in row {
+                if let l = sq.letter, !l.isEmpty, l != "." {
+                    s += sq.isBlank ? l.lowercased() : l.uppercased()
+                } else {
+                    s += "."
+                }
+            }
+        }
+        return s
+    }
+}
+
+/// Per-user archive of finished games, persisted in iCloud KVS so it syncs across the
+/// user's own devices. Capped to the most recent `maxRecords`. Records dedup by id, and
+/// external (other-device) changes are merged in by id (newest date wins) so devices
+/// converge rather than clobber each other.
+@MainActor
+@Observable
+final class GameHistoryStore {
+    private let kvStore = NSUbiquitousKeyValueStore.default
+    private static let key = "gameHistory"
+    private static let maxRecords = 200
+
+    /// Newest first.
+    private(set) var games: [GameRecord] = []
+
+    init() {
+        games = sortedCapped(loadFromStore())
+        NotificationCenter.default.addObserver(
+            forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: kvStore, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.mergeFromStore() }
+        }
+        kvStore.synchronize()
+    }
+
+    /// Record a finished game (dedup by id). Re-reads the store first so a concurrent
+    /// remote change isn't clobbered.
+    func record(_ g: GameRecord) {
+        var merged = loadFromStore()
+        merged.removeAll { $0.id == g.id }
+        merged.append(g)
+        persist(merged)
+    }
+
+    /// Whether a game with this id is already archived (used to dedup online games by matchID).
+    func contains(_ id: String) -> Bool { games.contains { $0.id == id } }
+
+    func delete(_ g: GameRecord) {
+        var cur = loadFromStore()
+        cur.removeAll { $0.id == g.id }
+        persist(cur)
+    }
+
+    func deleteAll() { persist([]) }
+
+    private func mergeFromStore() {
+        var byID: [String: GameRecord] = [:]
+        for r in games + loadFromStore() {
+            if let existing = byID[r.id], existing.date >= r.date { continue }
+            byID[r.id] = r
+        }
+        persist(Array(byID.values))
+    }
+
+    private func loadFromStore() -> [GameRecord] {
+        guard let data = kvStore.data(forKey: Self.key),
+              let recs = try? JSONDecoder().decode([GameRecord].self, from: data) else { return [] }
+        return recs
+    }
+
+    private func persist(_ recs: [GameRecord]) {
+        let capped = sortedCapped(recs)
+        games = capped
+        if let data = try? JSONEncoder().encode(capped) {
+            kvStore.set(data, forKey: Self.key)
+            kvStore.synchronize()
+        }
+    }
+
+    private func sortedCapped(_ recs: [GameRecord]) -> [GameRecord] {
+        Array(recs.sorted { $0.date > $1.date }.prefix(Self.maxRecords))
     }
 }
