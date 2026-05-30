@@ -542,8 +542,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
             print("[GameCenter] submitTurn: no current match!")
             return
         }
-        guard isAllowedMatch(match),
-              let expectedOpponentID = FamilyMultiplayer.opponentID(for: localPlayerID) else {
+        guard isAllowedMatch(match) else {
             engine?.errorMessage = FamilyMultiplayerError.unexpectedParticipants.localizedDescription
             return
         }
@@ -551,8 +550,13 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
         // gets retried — never drop a committed move before the retry net exists.
         pendingTurn = PendingTurn(matchID: match.matchID, data: matchData)
 
+        // Next participant(s) = everyone except the local player. This INCLUDES an
+        // unresolved auto-match slot (player == nil) so the OPENING move can be passed
+        // to the not-yet-joined opponent; isAllowedMatch already guarantees no stranger
+        // is in the match. (Filtering by the resolved opponent ID would make the first
+        // move un-sendable until the opponent's GKPlayer resolves.)
         let nextParticipants = match.participants.filter {
-            $0.player?.gamePlayerID == expectedOpponentID
+            $0.player?.gamePlayerID != localPlayerID
         }
         print("[GameCenter] submitTurn: \(matchData.count) bytes, nextParticipants=\(nextParticipants.count)")
         for p in nextParticipants {
@@ -588,7 +592,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
                         throw FamilyMultiplayerError.unexpectedParticipants
                     }
                     let freshNext = freshMatch.participants.filter {
-                        $0.player?.gamePlayerID == expectedOpponentID
+                        $0.player?.gamePlayerID != self.localPlayerID
                     }
                     guard !freshNext.isEmpty else {
                         print("[GameCenter] submitTurn attempt \(attempt): no next participants")
@@ -807,7 +811,7 @@ class GameCenterManager: NSObject, GKLocalPlayerListener {
 
                 if isMyTurn {
                     let nextParticipants = fresh.participants.filter {
-                        $0.player?.gamePlayerID == FamilyMultiplayer.opponentID(for: self.localPlayerID)
+                        $0.player?.gamePlayerID != self.localPlayerID
                     }
                     try await fresh.participantQuitInTurn(
                         with: .quit,

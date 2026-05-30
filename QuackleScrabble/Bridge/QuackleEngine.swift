@@ -131,21 +131,32 @@ class QuackleEngine {
     private var animationTask: Task<Void, Never>?
     /// Tracks the in-flight AI compute/trigger so a game (re)start can invalidate it.
     private var aiTriggerTask: Task<Void, Never>?
-    /// True while `haveComputerPlay` is running on the bridge queue. Read on MainActor
-    /// to avoid touching `_game` (e.g. saveGameState) concurrently with AI mutation.
+    /// True while an AI compute is logically in flight (gates saveGameState; cleared by
+    /// cancelAIWork on supersession so a discarded compute doesn't block saves).
     private var aiComputeInFlight = false
+    /// True only while `haveComputerPlay` is ACTUALLY executing on the bridge queue
+    /// (set/cleared around the queue dispatch, NOT reset by cancelAIWork). withBridgeSync
+    /// uses this to decide whether it must serialize.
+    private var bridgeQueueBusy = false
     /// Bumped on every game (re)start/restore so a stale AI result is discarded.
     private var aiGeneration = 0
 
     private let bridge: QuackleBridge = QuackleBridge.shared()
     private let bridgeQueue = DispatchQueue(label: "com.bef.quackle.bridge")
 
-    /// Run a destructive bridge mutation (new game / restore — which `delete _game`)
-    /// serially on the bridge queue so it cannot run while a `haveComputerPlay` is
-    /// still dereferencing the old `_game` on that queue (use-after-free). Blocks the
-    /// caller briefly (only when an AI compute is mid-flight) and keeps callers sync.
+    /// Run a destructive bridge mutation (new game / restore — which `delete _game`).
+    /// If a `haveComputerPlay` is actually on the queue, serialize behind it via
+    /// `bridgeQueue.sync` so we can't free `_game` mid-compute (use-after-free).
+    /// Otherwise run directly — the queue is idle, so there's nothing to race, and we
+    /// avoid `DispatchQueue.sync` from a Swift-concurrency context (unsafeForcedSync).
+    /// Callers always `cancelAIWork()` first, which bumps the generation so a not-yet-
+    /// dispatched compute bails instead of running against the new `_game`.
     private func withBridgeSync(_ body: @escaping () -> Void) {
-        bridgeQueue.sync(execute: body)
+        if bridgeQueueBusy {
+            bridgeQueue.sync(execute: body)
+        } else {
+            body()
+        }
     }
 
     /// Clear transient interaction state that must not survive a state reload (e.g. an
@@ -846,9 +857,11 @@ class QuackleEngine {
                 self.aiComputeInFlight = false
                 return
             }
+            self.bridgeQueueBusy = true   // a compute is now actually on the queue
             let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
                 queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
             }
+            self.bridgeQueueBusy = false  // queue work done (resume runs after it returns)
             self.aiComputeInFlight = false
             // Discard a stale result: a new game/restore (or cancellation) happened
             // while the AI was thinking, so this move belongs to a game that's gone.
