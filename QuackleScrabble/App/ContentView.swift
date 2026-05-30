@@ -188,7 +188,7 @@ struct GameView: View {
                 SkillSliderView()
                     .environment(engine)
                     #if os(iOS)
-                    .presentationDetents([.height(200)])
+                    .presentationDetents([.height(320)])
                     #endif
             }
         }
@@ -425,7 +425,7 @@ struct SkillSliderView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal)
 
-            Text("Skill takes effect on next new game; bingo vocabulary applies immediately")
+            Text("Skill takes effect on next new game;\nbingo vocabulary applies immediately")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

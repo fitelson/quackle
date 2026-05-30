@@ -37,7 +37,7 @@ struct MoveInputView: View {
                 .buttonStyle(.bordered)
 
                 Menu {
-                    Button("AI Skill Level") {
+                    Button("AI Skill: \(String(format: "%.1f", engine.skillLevel)) · Bingo \(Int(round(engine.bingoKnowledge * 100)))%") {
                         engine.activeSheet = .skillSlider
                     }
                     if engine.gameMode == .multiplayer && !engine.isGameOver {
