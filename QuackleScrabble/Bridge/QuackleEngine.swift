@@ -138,9 +138,6 @@ class QuackleEngine {
     private var animationTask: Task<Void, Never>?
     /// Tracks the in-flight AI compute/trigger so a game (re)start can invalidate it.
     private var aiTriggerTask: Task<Void, Never>?
-    /// True while an AI compute is logically in flight (gates saveGameState; cleared by
-    /// cancelAIWork on supersession so a discarded compute doesn't block saves).
-    private var aiComputeInFlight = false
     /// True only while `haveComputerPlay` is ACTUALLY executing on the bridge queue
     /// (set/cleared around the queue dispatch, NOT reset by cancelAIWork). withBridgeSync
     /// uses this to decide whether it must serialize.
@@ -194,11 +191,6 @@ class QuackleEngine {
         isAnimatingAIMove = false
         aiAnimTiles = []
         aiAnimPhase = 0
-        // The discarded AI Task's continuation would normally reset this, but it can't
-        // run until the current synchronous MainActor call returns — and callers run a
-        // withBridgeSync (draining the queue, so _game is stable) right after. Reset now
-        // so the new game's first saveGameState isn't skipped.
-        aiComputeInFlight = false
     }
 
     private var canCommitCurrentTurn: Bool {
@@ -861,22 +853,17 @@ class QuackleEngine {
         let queue = self.bridgeQueue
         let bingoKnowledge = min(max(self.bingoKnowledge, 0.0), 1.0)
         let gen = aiGeneration
-        aiComputeInFlight = true
         aiTriggerTask?.cancel()
         aiTriggerTask = Task {
             // Bail BEFORE enqueuing the bridge call if this task was already cancelled
             // / superseded (a new game started in the same tick) — don't even issue
             // haveComputerPlay against a game that's gone.
-            guard !Task.isCancelled, gen == self.aiGeneration else {
-                self.aiComputeInFlight = false
-                return
-            }
+            guard !Task.isCancelled, gen == self.aiGeneration else { return }
             self.bridgeQueueBusy = true   // a compute is now actually on the queue
             let result = await withCheckedContinuation { (c: CheckedContinuation<QBMoveInfo?, Never>) in
                 queue.async { c.resume(returning: bridge.haveComputerPlay(withBingoKnowledge: bingoKnowledge)) }
             }
             self.bridgeQueueBusy = false  // queue work done (resume runs after it returns)
-            self.aiComputeInFlight = false
             // Discard a stale result: a new game/restore (or cancellation) happened
             // while the AI was thinking, so this move belongs to a game that's gone.
             guard !Task.isCancelled, gen == self.aiGeneration else { return }
@@ -956,6 +943,17 @@ class QuackleEngine {
     }
 
     private func refreshState() {
+        // INVARIANT: refreshState reads (and finalizeIfPlayedOut mutates) the C++ _game on
+        // the MainActor and must NOT run while `haveComputerPlay` is actively executing on
+        // bridgeQueue. This is guaranteed by call-site discipline, NOT by a `!bridgeQueueBusy`
+        // guard: bridgeQueueBusy can be (correctly) stale-true here — e.g. inside
+        // loadSavedGame, where withBridgeSync has already drained the queue (so _game is
+        // stable) but the AI task's continuation that clears the flag hasn't run yet because
+        // the MainActor is busy with the load. A `!bridgeQueueBusy` early-return would then
+        // wrongly SKIP the post-restore refresh/finalize. So: keep callers off the compute
+        // window (every destructive path calls cancelAIWork()+withBridgeSync first), and do
+        // not gate this on bridgeQueueBusy.
+        //
         // Endgame safety net: if the current player has played out (empty rack + empty bag)
         // but it wasn't detected at commit time, finalize the game now (with the play-out
         // score adjustment) BEFORE we read game-over/scores below.

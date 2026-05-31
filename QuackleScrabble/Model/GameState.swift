@@ -193,74 +193,101 @@ struct GameRecord: Codable, Identifiable {
 }
 
 /// Per-user archive of finished games, persisted in iCloud KVS so it syncs across the
-/// user's own devices. Capped to the most recent `maxRecords`. Records dedup by id, and
-/// external (other-device) changes are merged in by id (newest date wins) so devices
-/// converge rather than clobber each other.
+/// user's own devices.
+///
+/// Storage is ONE KVS KEY PER GAME (`ghRec_<id>` → JSON(GameRecord)), NOT a single shared
+/// array. This is deliberate: a shared-array read-modify-write is a distributed
+/// last-writer-wins blob, so two of the user's devices archiving around the same time can
+/// clobber each other's records (a lost update). Per-record keys are naturally convergent —
+/// each device only ever writes its OWN game's key, and the same game id resolves to the
+/// same record, so there is no shared blob to lose. Deletes use a tombstone (`ghDel_<id>`)
+/// so a delete on one device can't be undone by another device re-syncing the record.
 @MainActor
 @Observable
 final class GameHistoryStore {
     private let kvStore = NSUbiquitousKeyValueStore.default
-    private static let key = "gameHistory"
-    private static let maxRecords = 200
+    private static let recPrefix = "ghRec_"        // one key per game: ghRec_<id> -> JSON(GameRecord)
+    private static let delPrefix = "ghDel_"        // delete tombstone: ghDel_<id>
+    private static let legacyKey = "gameHistory"   // old single-array key (migrated away on launch)
+    private static let maxDisplay = 200            // newest N surfaced in `games`
+    private static let maxStored = 400             // hard cap on stored record keys (KVS allows ~1024)
 
     /// Newest first.
     private(set) var games: [GameRecord] = []
 
     init() {
-        games = sortedCapped(loadFromStore())
+        migrateLegacyIfNeeded()
+        reload()
         NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: kvStore, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.mergeFromStore() }
+            Task { @MainActor in self?.reload() }
         }
         kvStore.synchronize()
     }
 
-    /// Record a finished game (dedup by id). Re-reads the store first so a concurrent
-    /// remote change isn't clobbered.
+    /// Record a finished game. Idempotent (keyed by id) and convergent across the user's
+    /// devices — writes only this game's key, never a shared array.
     func record(_ g: GameRecord) {
-        var merged = loadFromStore()
-        merged.removeAll { $0.id == g.id }
-        merged.append(g)
-        persist(merged)
+        guard let data = try? JSONEncoder().encode(g) else { return }
+        kvStore.removeObject(forKey: Self.delPrefix + g.id)   // un-tombstone if re-recorded
+        kvStore.set(data, forKey: Self.recPrefix + g.id)
+        kvStore.synchronize()
+        reload()
     }
 
     /// Whether a game with this id is already archived (used to dedup online games by matchID).
-    func contains(_ id: String) -> Bool { games.contains { $0.id == id } }
+    /// Checks storage directly, so it's reliable even beyond the display cap.
+    func contains(_ id: String) -> Bool { kvStore.data(forKey: Self.recPrefix + id) != nil }
 
     func delete(_ g: GameRecord) {
-        var cur = loadFromStore()
-        cur.removeAll { $0.id == g.id }
-        persist(cur)
+        kvStore.set("1", forKey: Self.delPrefix + g.id)       // tombstone so it can't re-sync back
+        kvStore.removeObject(forKey: Self.recPrefix + g.id)
+        kvStore.synchronize()
+        reload()
     }
 
-    func deleteAll() { persist([]) }
-
-    private func mergeFromStore() {
-        var byID: [String: GameRecord] = [:]
-        for r in games + loadFromStore() {
-            if let existing = byID[r.id], existing.date >= r.date { continue }
-            byID[r.id] = r
+    func deleteAll() {
+        for g in games {
+            kvStore.set("1", forKey: Self.delPrefix + g.id)
+            kvStore.removeObject(forKey: Self.recPrefix + g.id)
         }
-        persist(Array(byID.values))
+        kvStore.synchronize()
+        reload()
     }
 
-    private func loadFromStore() -> [GameRecord] {
-        guard let data = kvStore.data(forKey: Self.key),
-              let recs = try? JSONDecoder().decode([GameRecord].self, from: data) else { return [] }
-        return recs
-    }
+    // MARK: - internals
 
-    private func persist(_ recs: [GameRecord]) {
-        let capped = sortedCapped(recs)
-        games = capped
-        if let data = try? JSONEncoder().encode(capped) {
-            kvStore.set(data, forKey: Self.key)
-            kvStore.synchronize()
+    private func reload() {
+        let all = kvStore.dictionaryRepresentation
+        let tombstoned = Set(all.keys
+            .filter { $0.hasPrefix(Self.delPrefix) }
+            .map { String($0.dropFirst(Self.delPrefix.count)) })
+        var recs: [GameRecord] = []
+        for (k, v) in all where k.hasPrefix(Self.recPrefix) {
+            guard let data = v as? Data,
+                  let rec = try? JSONDecoder().decode(GameRecord.self, from: data),
+                  !tombstoned.contains(rec.id) else { continue }
+            recs.append(rec)
         }
+        recs.sort { $0.date > $1.date }
+        if recs.count > Self.maxStored {
+            for g in recs.dropFirst(Self.maxStored) {   // space-prune oldest keys (no tombstone)
+                kvStore.removeObject(forKey: Self.recPrefix + g.id)
+            }
+            recs = Array(recs.prefix(Self.maxStored))
+        }
+        games = Array(recs.prefix(Self.maxDisplay))
     }
 
-    private func sortedCapped(_ recs: [GameRecord]) -> [GameRecord] {
-        Array(recs.sorted { $0.date > $1.date }.prefix(Self.maxRecords))
+    /// One-time migration off the old single-array `gameHistory` key into per-record keys.
+    private func migrateLegacyIfNeeded() {
+        guard let data = kvStore.data(forKey: Self.legacyKey),
+              let recs = try? JSONDecoder().decode([GameRecord].self, from: data) else { return }
+        for r in recs where kvStore.data(forKey: Self.recPrefix + r.id) == nil {
+            if let d = try? JSONEncoder().encode(r) { kvStore.set(d, forKey: Self.recPrefix + r.id) }
+        }
+        kvStore.removeObject(forKey: Self.legacyKey)
+        kvStore.synchronize()
     }
 }
