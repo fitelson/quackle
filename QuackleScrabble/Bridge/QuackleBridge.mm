@@ -764,6 +764,8 @@ static LetterString bingoFullWord(const Move &m, const Board &board) {
                 if (move.action == Move::Exchange || move.action == Move::BlindExchange) {
                     int n = (int)move.tiles().length();
                     entry.moveDescription = [NSString stringWithFormat:@"Exchanged %d tile%@", n, (n == 1 ? @"" : @"s")];
+                } else if (move.action == Move::Pass) {
+                    entry.moveDescription = @"Pass";  // not "-" (move.toString())
                 } else {
                     entry.moveDescription = uvToNS(move.toString());
                 }
