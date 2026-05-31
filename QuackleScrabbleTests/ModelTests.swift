@@ -461,4 +461,132 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(grid[0][2]?.isBlank, true)
         XCTAssertEqual(grid[1][1]?.letter, "B")
     }
+
+    // MARK: - GameHistoryStore (tombstone / dedup / migration / prune) — fake KVS
+
+    private func rec(_ id: String, _ t: TimeInterval) -> GameRecord {
+        GameRecord(id: id, date: Date(timeIntervalSince1970: t), isOnline: true,
+                   localName: "You", opponentName: "Tina", localScore: 1, opponentScore: 0,
+                   board: "", cols: 0)
+    }
+
+    @MainActor
+    func testRecordRefusesTombstonedID() {
+        let kv = InMemoryKeyValueStore()
+        let store = GameHistoryStore(store: kv)
+        let g = rec("g1", 1)
+        store.record(g)
+        XCTAssertEqual(store.games.count, 1)
+        store.delete(g)
+        XCTAssertTrue(store.games.isEmpty)
+        store.record(g)                              // re-record a deleted game
+        XCTAssertTrue(store.games.isEmpty)           // refused — stays deleted
+        XCTAssertNil(kv.data(forKey: "ghRec_g1"))    // no record key rewritten
+    }
+
+    @MainActor
+    func testContainsTrueForTombstonedID() {
+        let kv = InMemoryKeyValueStore()
+        let store = GameHistoryStore(store: kv)
+        let g = rec("g1", 1)
+        store.record(g)
+        XCTAssertTrue(store.contains("g1"))
+        store.delete(g)
+        XCTAssertTrue(store.contains("g1"))          // tombstone-aware: still "contained"
+        XCTAssertFalse(store.contains("nope"))
+    }
+
+    @MainActor
+    func testLegacyArrayMigrationSkipsTombstoned() throws {
+        let kv = InMemoryKeyValueStore()
+        kv.setData(try JSONEncoder().encode([rec("g1", 1), rec("g2", 2)]), forKey: "gameHistory")
+        kv.setString("1", forKey: "ghDel_g1")        // g1 was deleted before migration
+        let store = GameHistoryStore(store: kv)      // runs migration on init
+        XCTAssertEqual(store.games.map(\.id), ["g2"])
+        XCTAssertNil(kv.data(forKey: "ghRec_g1"))    // tombstoned id not migrated back
+        XCTAssertNotNil(kv.data(forKey: "ghRec_g2"))
+        XCTAssertNil(kv.data(forKey: "gameHistory")) // legacy key consumed
+    }
+
+    @MainActor
+    func testReloadExcludesTombstoned() throws {
+        let kv = InMemoryKeyValueStore()
+        kv.setData(try JSONEncoder().encode(rec("g1", 1)), forKey: "ghRec_g1")
+        kv.setString("1", forKey: "ghDel_g1")        // record key AND tombstone present
+        let store = GameHistoryStore(store: kv)
+        XCTAssertTrue(store.games.isEmpty)           // reload excludes the tombstoned record
+    }
+
+    @MainActor
+    func testDeleteAllRemovesBeyondDisplayCap() throws {
+        // 250 stored records: more than maxDisplay (200), fewer than maxStored (400). deleteAll
+        // must clear ALL of them — iterating the displayed `games` (200) would orphan the rest.
+        let kv = InMemoryKeyValueStore()
+        for i in 0..<250 { kv.setData(try JSONEncoder().encode(rec("g\(i)", TimeInterval(i))), forKey: "ghRec_g\(i)") }
+        let store = GameHistoryStore(store: kv)
+        XCTAssertEqual(store.games.count, 200)                                       // display-capped
+        XCTAssertEqual(kv.allEntries.keys.filter { $0.hasPrefix("ghRec_") }.count, 250)
+        store.deleteAll()
+        XCTAssertTrue(store.games.isEmpty)
+        XCTAssertEqual(kv.allEntries.keys.filter { $0.hasPrefix("ghRec_") }.count, 0) // ALL cleared
+    }
+
+    @MainActor
+    func testMaxStoredPrunesOldest() throws {
+        // 410 stored records (> maxStored 400): reload prunes the 10 oldest record keys.
+        let kv = InMemoryKeyValueStore()
+        for i in 0..<410 { kv.setData(try JSONEncoder().encode(rec("g\(i)", TimeInterval(i))), forKey: "ghRec_g\(i)") }
+        let store = GameHistoryStore(store: kv)
+        XCTAssertEqual(kv.allEntries.keys.filter { $0.hasPrefix("ghRec_") }.count, 400)
+        XCTAssertNil(kv.data(forKey: "ghRec_g0"))      // oldest pruned
+        XCTAssertNil(kv.data(forKey: "ghRec_g9"))
+        XCTAssertNotNil(kv.data(forKey: "ghRec_g10"))  // survivor
+        XCTAssertEqual(store.games.count, 200)         // display still capped
+        XCTAssertEqual(store.games.first?.id, "g409")  // newest first
+    }
+
+    // MARK: - loadSavedGame integrity (tile conservation)
+
+    @MainActor
+    func testLoadSavedGameRejectsInvalidTileCountAndClearsSave() throws {
+        let key = "savedGameState"
+        let defaults = UserDefaults.standard
+        let original = defaults.data(forKey: key)
+        defer {   // never clobber a real in-progress save when running on a dev machine
+            if let o = original { defaults.set(o, forKey: key) } else { defaults.removeObject(forKey: key) }
+        }
+        // A save whose tiles don't sum to 100 (here: 1) must be rejected and cleared, not loaded.
+        let bad = SavedGameState(humanFirst: true, skillLevel: 0.5, board: [], players: [],
+                                 bag: ["A"], isGameOver: false, isHumanTurn: true, moveHistory: [])
+        defaults.set(try JSONEncoder().encode(bad), forKey: key)
+        let engine = QuackleEngine()
+        XCTAssertFalse(engine.loadSavedGame())      // rejected before any bridge restore
+        XCTAssertNil(defaults.data(forKey: key))    // corrupt save auto-healed away
+    }
+
+    // MARK: - AI skill interpolation (non-anchor points)
+
+    @MainActor
+    func testAISkillInterpolatesBetweenAnchors() {
+        let engine = QuackleEngine()
+        engine.skillLevel = 0.25                     // halfway between anchors 0 and 0.5
+        XCTAssertEqual(engine.skillMeanLoss, 15.0, accuracy: 0.0001)  // 20 → 10
+        XCTAssertEqual(engine.skillStdDev, 7.0, accuracy: 0.0001)     // 8 → 6
+        engine.skillLevel = 0.75                     // halfway between anchors 0.5 and 1
+        XCTAssertEqual(engine.skillMeanLoss, 6.0, accuracy: 0.0001)   // 10 → 2
+        XCTAssertEqual(engine.skillStdDev, 4.0, accuracy: 0.0001)     // 6 → 2
+    }
+}
+
+/// In-memory `KeyValueStore` so GameHistoryStore can be tested deterministically without the
+/// real (process-wide, non-deterministic) iCloud key-value store.
+final class InMemoryKeyValueStore: KeyValueStore {
+    private var storage: [String: Any] = [:]
+    func data(forKey key: String) -> Data? { storage[key] as? Data }
+    func string(forKey key: String) -> String? { storage[key] as? String }
+    func setData(_ data: Data, forKey key: String) { storage[key] = data }
+    func setString(_ string: String, forKey key: String) { storage[key] = string }
+    func removeObject(forKey key: String) { storage.removeValue(forKey: key) }
+    var allEntries: [String: Any] { storage }
+    @discardableResult func synchronize() -> Bool { true }
 }

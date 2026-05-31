@@ -192,6 +192,27 @@ struct GameRecord: Codable, Identifiable {
     }
 }
 
+/// Minimal key-value abstraction over NSUbiquitousKeyValueStore so GameHistoryStore can be
+/// unit-tested against an in-memory fake — the real iCloud KVS shares a process-wide namespace
+/// and can't be exercised deterministically. Method names are deliberately distinct from
+/// NSUbiquitousKeyValueStore's own overloaded `set`/`dictionaryRepresentation` so the
+/// conformance below is unambiguous.
+protocol KeyValueStore: AnyObject {
+    func data(forKey key: String) -> Data?
+    func string(forKey key: String) -> String?
+    func setData(_ data: Data, forKey key: String)
+    func setString(_ string: String, forKey key: String)
+    func removeObject(forKey key: String)
+    var allEntries: [String: Any] { get }
+    @discardableResult func synchronize() -> Bool
+}
+
+extension NSUbiquitousKeyValueStore: KeyValueStore {
+    func setData(_ data: Data, forKey key: String) { set(data, forKey: key) }
+    func setString(_ string: String, forKey key: String) { set(string, forKey: key) }
+    var allEntries: [String: Any] { dictionaryRepresentation }
+}
+
 /// Per-user archive of finished games, persisted in iCloud KVS so it syncs across the
 /// user's own devices.
 ///
@@ -205,7 +226,7 @@ struct GameRecord: Codable, Identifiable {
 @MainActor
 @Observable
 final class GameHistoryStore {
-    private let kvStore = NSUbiquitousKeyValueStore.default
+    private let kvStore: KeyValueStore
     private static let recPrefix = "ghRec_"        // one key per game: ghRec_<id> -> JSON(GameRecord)
     private static let delPrefix = "ghDel_"        // delete tombstone: ghDel_<id>
     private static let legacyKey = "gameHistory"   // old single-array key (migrated away on launch)
@@ -215,12 +236,14 @@ final class GameHistoryStore {
     /// Newest first.
     private(set) var games: [GameRecord] = []
 
-    init() {
+    /// `store` is injectable so tests can pass an in-memory fake; production uses iCloud KVS.
+    init(store: KeyValueStore = NSUbiquitousKeyValueStore.default) {
+        self.kvStore = store
         migrateLegacyIfNeeded()
         reload()
         NotificationCenter.default.addObserver(
             forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-            object: kvStore, queue: .main) { [weak self] _ in
+            object: store, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.reload() }
         }
         kvStore.synchronize()
@@ -234,7 +257,7 @@ final class GameHistoryStore {
         // explicit undelete — not implicitly here — so no call path (a finished online match
         // re-seen as over, a cross-device re-sync) can re-archive a record the user removed.
         guard kvStore.string(forKey: Self.delPrefix + g.id) == nil else { return }
-        kvStore.set(data, forKey: Self.recPrefix + g.id)
+        kvStore.setData(data, forKey: Self.recPrefix + g.id)
         kvStore.synchronize()
         reload()
     }
@@ -247,16 +270,20 @@ final class GameHistoryStore {
     }
 
     func delete(_ g: GameRecord) {
-        kvStore.set("1", forKey: Self.delPrefix + g.id)       // tombstone so it can't re-sync back
+        kvStore.setString("1", forKey: Self.delPrefix + g.id)  // tombstone so it can't re-sync back
         kvStore.removeObject(forKey: Self.recPrefix + g.id)
         kvStore.synchronize()
         reload()
     }
 
     func deleteAll() {
-        for g in games {
-            kvStore.set("1", forKey: Self.delPrefix + g.id)
-            kvStore.removeObject(forKey: Self.recPrefix + g.id)
+        // Iterate the STORED record keys, not `games`: `games` is display-capped at maxDisplay
+        // while storage holds up to maxStored, so iterating `games` would leave the oldest
+        // records behind (and they'd repopulate on the next reload). Tombstone + remove all.
+        for key in kvStore.allEntries.keys where key.hasPrefix(Self.recPrefix) {
+            let id = String(key.dropFirst(Self.recPrefix.count))
+            kvStore.setString("1", forKey: Self.delPrefix + id)
+            kvStore.removeObject(forKey: key)
         }
         kvStore.synchronize()
         reload()
@@ -265,7 +292,7 @@ final class GameHistoryStore {
     // MARK: - internals
 
     private func reload() {
-        let all = kvStore.dictionaryRepresentation
+        let all = kvStore.allEntries
         let tombstoned = Set(all.keys
             .filter { $0.hasPrefix(Self.delPrefix) }
             .map { String($0.dropFirst(Self.delPrefix.count)) })
@@ -292,7 +319,7 @@ final class GameHistoryStore {
               let recs = try? JSONDecoder().decode([GameRecord].self, from: data) else { return }
         for r in recs where kvStore.data(forKey: Self.recPrefix + r.id) == nil
             && kvStore.string(forKey: Self.delPrefix + r.id) == nil {   // don't migrate a tombstoned id back
-            if let d = try? JSONEncoder().encode(r) { kvStore.set(d, forKey: Self.recPrefix + r.id) }
+            if let d = try? JSONEncoder().encode(r) { kvStore.setData(d, forKey: Self.recPrefix + r.id) }
         }
         kvStore.removeObject(forKey: Self.legacyKey)
         kvStore.synchronize()
