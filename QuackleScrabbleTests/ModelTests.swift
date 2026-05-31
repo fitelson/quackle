@@ -361,6 +361,57 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(decoded.turnNumber, 1)
     }
 
+    func testMultiplayerGameStateDecodesMissingScorelessAndGameOver() throws {
+        // Finding #2: a payload from before these fields existed must decode with defaults
+        // (consecutiveScorelessTurns → 0, isGameOver → false), matching SavedGameState's posture.
+        let payload: [String: Any] = [
+            "version": 1,
+            "player1GameCenterID": "G:abc123",
+            "player2GameCenterID": "G:def456",
+            "player1DisplayName": "Alice",
+            "player2DisplayName": "Bob",
+            "board": [],
+            "playerScores": [0, 0],
+            "playerRacks": [["A"], ["B"]],
+            "bag": ["C"],
+            "currentPlayerIndex": 0,
+            "moveHistory": []
+            // deliberately NO isGameOver and NO consecutiveScorelessTurns
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(MultiplayerGameState.self, from: data)
+        XCTAssertFalse(decoded.isGameOver)
+        XCTAssertEqual(decoded.consecutiveScorelessTurns, 0)
+    }
+
+    // MARK: - Multiplayer state structural validation (Finding #3 preflight)
+
+    func testMultiplayerStateStructuralValidation() {
+        let emptyRow: [SavedTile?] = Array(repeating: nil, count: 15)
+        let board15: [[SavedTile?]] = Array(repeating: emptyRow, count: 15)
+        let rack = ["A", "B", "C", "D", "E", "F", "G"]          // 7 tiles
+        let bag86 = Array(repeating: "Z", count: 86)            // 7 + 7 + 86 = 100
+        func mk(board: [[SavedTile?]] = board15, racks: [[String]] = [rack, rack],
+                scores: [Int] = [0, 0], bag: [String] = bag86, current: Int = 0) -> MultiplayerGameState {
+            MultiplayerGameState(
+                player1GameCenterID: "G:a", player2GameCenterID: "G:b",
+                player1DisplayName: "A", player2DisplayName: "B",
+                board: board, playerScores: scores, playerRacks: racks, bag: bag,
+                currentPlayerIndex: current, moveHistory: [], isGameOver: false,
+                consecutiveScorelessTurns: 0)
+        }
+        // Valid opening position: 0 board + 14 rack + 86 bag = 100 tiles, 15×15, current 0.
+        XCTAssertTrue(QuackleEngine.isStructurallyValidMultiplayerState(mk()))
+        // 99 tiles (bag short by one) → rejected by tile conservation.
+        XCTAssertFalse(QuackleEngine.isStructurallyValidMultiplayerState(mk(bag: Array(repeating: "Z", count: 85))))
+        // Wrong board dimensions (14 rows) → rejected.
+        XCTAssertFalse(QuackleEngine.isStructurallyValidMultiplayerState(mk(board: Array(repeating: emptyRow, count: 14))))
+        // currentPlayerIndex outside {0,1} → rejected.
+        XCTAssertFalse(QuackleEngine.isStructurallyValidMultiplayerState(mk(current: 2)))
+        // Wrong rack count → rejected.
+        XCTAssertFalse(QuackleEngine.isStructurallyValidMultiplayerState(mk(racks: [rack])))
+    }
+
     // MARK: - GameRecord (game history)
 
     func testGameRecordCodableRoundtrip() throws {

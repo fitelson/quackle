@@ -1301,7 +1301,39 @@ class QuackleEngine {
         refreshState()
     }
 
+    /// Structural integrity check for incoming multiplayer match data, run BEFORE the
+    /// destructive restoreTwoHumanGame. A valid CSW19 two-human position is a 15×15 board,
+    /// exactly two scores and two racks, a current player index of 0 or 1, and exactly 100
+    /// tiles across bag + board(real letters) + racks. Match data is normally the app's own
+    /// trusted exportMultiplayerState output, so this only fires on a producer bug or
+    /// storage/transit corruption — but it's the half that actually preserves the visible game
+    /// from bad incoming data (the post-restore check below can only detect already-done damage).
+    /// Mirrors the tile-conservation guard loadSavedGame applies to local AI saves.
+    /// `nonisolated` (pure, reads only its argument) so it's unit-testable off the MainActor.
+    nonisolated static func isStructurallyValidMultiplayerState(_ state: MultiplayerGameState) -> Bool {
+        guard state.board.count == 15, state.board.allSatisfy({ $0.count == 15 }) else { return false }
+        guard state.playerScores.count == 2, state.playerRacks.count == 2 else { return false }
+        guard state.currentPlayerIndex == 0 || state.currentPlayerIndex == 1 else { return false }
+        let boardTiles = state.board.reduce(0) { acc, row in
+            acc + row.reduce(0) { inner, tile in
+                guard let letter = tile?.letter, !letter.isEmpty, letter != "." else { return inner }
+                return inner + 1
+            }
+        }
+        let rackTiles = state.playerRacks.reduce(0) { $0 + $1.count }
+        return state.bag.count + boardTiles + rackTiles == 100
+    }
+
     func loadMultiplayerState(_ state: MultiplayerGameState, localPlayerIndex: Int, matchID: String) {
+        // Preflight integrity check BEFORE the destructive restore below: restoreTwoHumanGame
+        // mutates (and on a throw deletes) the C++ _game, so once we enter it the currently
+        // visible game is gone. Reject structurally impossible incoming match data here — while
+        // the current game is still intact — rather than only detecting the damage afterward.
+        guard Self.isStructurallyValidMultiplayerState(state) else {
+            print("[QuackleEngine] Rejected structurally invalid multiplayer state for match \(matchID) — keeping current game")
+            errorMessage = "Failed to load game state"
+            return
+        }
         // Switching from an AI game (possibly mid-AI-think) — invalidate AI work so the
         // destructive restore below can't race an in-flight haveComputerPlay.
         cancelAIWork()
@@ -1359,6 +1391,16 @@ class QuackleEngine {
                 scorelessTurns: Int32(state.consecutiveScorelessTurns),
                 gameOver: state.isGameOver
             )
+        }
+
+        // The bridge fails closed (deletes the half-built game) if restoreTwoHumanGame threw.
+        // The preflight above already rejected structurally bad data while the old game was
+        // intact; this catches a restore that passed preflight but still failed in the bridge,
+        // so we surface an error instead of entering multiplayer mode over a nil game.
+        guard Int(bridge.numberOfPlayers()) == 2 else {
+            print("[QuackleEngine] restoreTwoHumanGame produced no game for match \(matchID) — aborting load")
+            errorMessage = "Failed to load game state"
+            return
         }
 
         gameMode = .multiplayer

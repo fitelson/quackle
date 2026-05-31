@@ -82,8 +82,12 @@ struct MultiplayerGameState: Codable {
                 moveHistory: moveHistory,
                 currentPlayerIndex: currentPlayerIndex
             )
-        isGameOver = try container.decode(Bool.self, forKey: .isGameOver)
-        consecutiveScorelessTurns = try container.decode(Int.self, forKey: .consecutiveScorelessTurns)
+        // Migration-tolerant: decode every field with decodeIfPresent + a default, matching
+        // SavedGameState's posture. A future field added with a plain `decode` would throw on
+        // older live match data and strand an in-progress online game (handleMatchFound shows
+        // "Failed to load game state"); decodeIfPresent closes that trap.
+        isGameOver = try container.decodeIfPresent(Bool.self, forKey: .isGameOver) ?? false
+        consecutiveScorelessTurns = try container.decodeIfPresent(Int.self, forKey: .consecutiveScorelessTurns) ?? 0
     }
 
     private static func inferredTurnNumber(

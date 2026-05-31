@@ -230,15 +230,21 @@ final class GameHistoryStore {
     /// devices — writes only this game's key, never a shared array.
     func record(_ g: GameRecord) {
         guard let data = try? JSONEncoder().encode(g) else { return }
-        kvStore.removeObject(forKey: Self.delPrefix + g.id)   // un-tombstone if re-recorded
+        // Never resurrect a deliberately-deleted game. A tombstone is cleared ONLY by an
+        // explicit undelete — not implicitly here — so no call path (a finished online match
+        // re-seen as over, a cross-device re-sync) can re-archive a record the user removed.
+        guard kvStore.string(forKey: Self.delPrefix + g.id) == nil else { return }
         kvStore.set(data, forKey: Self.recPrefix + g.id)
         kvStore.synchronize()
         reload()
     }
 
-    /// Whether a game with this id is already archived (used to dedup online games by matchID).
-    /// Checks storage directly, so it's reliable even beyond the display cap.
-    func contains(_ id: String) -> Bool { kvStore.data(forKey: Self.recPrefix + id) != nil }
+    /// Whether a game with this id is already archived OR deliberately deleted (used to dedup
+    /// online games by matchID). Tombstone-aware: a deleted id reports `true` so the game-over
+    /// archiver won't re-create it. Checks storage directly, reliable beyond the display cap.
+    func contains(_ id: String) -> Bool {
+        kvStore.data(forKey: Self.recPrefix + id) != nil || kvStore.string(forKey: Self.delPrefix + id) != nil
+    }
 
     func delete(_ g: GameRecord) {
         kvStore.set("1", forKey: Self.delPrefix + g.id)       // tombstone so it can't re-sync back
@@ -284,7 +290,8 @@ final class GameHistoryStore {
     private func migrateLegacyIfNeeded() {
         guard let data = kvStore.data(forKey: Self.legacyKey),
               let recs = try? JSONDecoder().decode([GameRecord].self, from: data) else { return }
-        for r in recs where kvStore.data(forKey: Self.recPrefix + r.id) == nil {
+        for r in recs where kvStore.data(forKey: Self.recPrefix + r.id) == nil
+            && kvStore.string(forKey: Self.delPrefix + r.id) == nil {   // don't migrate a tombstoned id back
             if let d = try? JSONEncoder().encode(r) { kvStore.set(d, forKey: Self.recPrefix + r.id) }
         }
         kvStore.removeObject(forKey: Self.legacyKey)
