@@ -956,6 +956,11 @@ class QuackleEngine {
     }
 
     private func refreshState() {
+        // Endgame safety net: if the current player has played out (empty rack + empty bag)
+        // but it wasn't detected at commit time, finalize the game now (with the play-out
+        // score adjustment) BEFORE we read game-over/scores below.
+        _ = bridge.finalizeIfPlayedOut()
+
         let rows = Int(bridge.boardRows())
         let cols = Int(bridge.boardCols())
         var newBoard: [[SquareModel]] = []

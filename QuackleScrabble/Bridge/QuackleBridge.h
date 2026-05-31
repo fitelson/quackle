@@ -71,6 +71,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (int)numberOfPlayers;
 - (int)tilesRemainingInBag;
 - (BOOL)isGameOver;
+// Endgame safety net: finalize the game if the current player has played out (empty rack +
+// empty bag) but it wasn't detected at commit time. Returns YES if it just ended the game.
+- (BOOL)finalizeIfPlayedOut;
 - (int)turnNumber;
 - (int)scorelessTurns;
 

@@ -365,6 +365,34 @@ static LetterString bingoFullWord(const Move &m, const Board &board) {
     return _game->currentPosition().gameOver();
 }
 
+// Endgame safety net: a player whose turn it is but whose RACK IS EMPTY with an EMPTY BAG
+// has played out — the game is over. Quackle's incrementTurn normally detects play-out at
+// commit time, but a played-through final-tile move was observed to slip past it (human
+// plays last tile → game NOT marked over → opponent gets a spurious extra pass → board
+// stuck on the played-out player's turn with an empty rack). Detect that and finalize with
+// Quackle's own play-out adjustment (createUnusedTilesBonus = +2x the opponent's remaining
+// tiles, credited to the player who went out). Idempotent (no-op once gameOver); returns
+// YES if it just ended the game. Called from refreshState before reading game-over/scores.
+- (BOOL)finalizeIfPlayedOut {
+    if (!_game || !_game->hasPositions()) return NO;
+    try {
+        GamePosition &pos = _game->currentPosition();
+        if (pos.gameOver()) return NO;
+        if (!pos.bag().empty()) return NO;                    // tiles still drawable → not played out
+        if (!pos.currentPlayer().rack().empty()) return NO;   // current player still has tiles
+        pos.adjustScoresToFinishGame();                       // stage +2x opponent deadwood for the out-player
+        pos.setGameOver(true);
+        NSLog(@"QuackleBridge: finalized played-out game (current player rack empty, bag empty)");
+        return YES;
+    } catch (const std::exception &e) {
+        NSLog(@"QuackleBridge: C++ exception in finalizeIfPlayedOut: %s", e.what());
+        return NO;
+    } catch (...) {
+        NSLog(@"QuackleBridge: Unknown C++ exception in finalizeIfPlayedOut");
+        return NO;
+    }
+}
+
 - (int)turnNumber {
     if (!_game || !_game->hasPositions()) return 0;
     return _game->currentPosition().turnNumber();
